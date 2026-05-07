@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { errMsg } from "@/lib/api";
 
 export default function Register() {
   const [name, setName] = useState("");
@@ -19,7 +20,7 @@ export default function Register() {
       toast.success("Account created");
       nav("/app/dashboard");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Registration failed");
+      toast.error(errMsg(err, "Registration failed"));
     } finally {
       setLoading(false);
     }

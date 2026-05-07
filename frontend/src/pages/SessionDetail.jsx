@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
+import { errMsg } from "@/lib/api";
 import { ChevronLeft, Sparkles, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -33,7 +34,7 @@ export default function SessionDetail() {
       setSession((s) => ({ ...s, training_plan: data }));
       toast.success("Training plan generated");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to generate plan");
+      toast.error(errMsg(err, "Failed to generate plan"));
     } finally {
       setGenerating(false);
     }

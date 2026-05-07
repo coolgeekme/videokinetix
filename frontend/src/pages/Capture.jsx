@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
+import { errMsg } from "@/lib/api";
 import SportPicker from "@/components/SportPicker";
 import PoseCanvas from "@/components/PoseCanvas";
 import { Upload, Camera, Loader2 } from "lucide-react";
@@ -44,7 +45,7 @@ export default function Capture() {
       toast.success("Analysis complete");
       nav(`/app/sessions/${data.id}`);
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Failed to analyze session");
+      toast.error(errMsg(err, "Failed to analyze session"));
     } finally {
       setAnalyzing(false);
     }

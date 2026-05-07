@@ -21,3 +21,25 @@ api.interceptors.response.use(
     return Promise.reject(err);
   }
 );
+
+/** Extract a human-readable error message from any axios/FastAPI error. */
+export function errMsg(err, fallback = "Something went wrong") {
+  const detail = err?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) =>
+        typeof d === "string"
+          ? d
+          : d?.msg
+            ? `${(d.loc || []).slice(-1)[0] || "field"}: ${d.msg}`
+            : JSON.stringify(d)
+      )
+      .join(" · ");
+  }
+  if (detail && typeof detail === "object") {
+    return detail.msg || JSON.stringify(detail);
+  }
+  if (typeof err?.message === "string") return err.message;
+  return fallback;
+}

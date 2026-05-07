@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { errMsg } from "@/lib/api";
 
 export default function Login() {
   const [email, setEmail] = useState("");
@@ -18,7 +19,7 @@ export default function Login() {
       toast.success("Welcome back");
       nav("/app/dashboard");
     } catch (err) {
-      toast.error(err?.response?.data?.detail || "Login failed");
+      toast.error(errMsg(err, "Login failed"));
     } finally {
       setLoading(false);
     }
