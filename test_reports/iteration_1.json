@@ -1,0 +1,40 @@
+{
+  "summary": "Backend testing completed for KINETIC AI motion-capture athlete platform. All 29 pytest cases pass against the public preview URL, exercising auth (register/login/me + JWT), sports catalog, sessions (with live GPT-5.2 form analysis), training plan generation (live GPT-5.2), dashboard stats, goals CRUD, and cross-user isolation. Live LLM calls round-trip in ~2-15s per call within the 90s timeout.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/auth/register", "issue": "Pydantic EmailStr rejects '.test' TLD (e.g. user@kinetic.test) because email-validator marks '.test' as a special-use/reserved name. /app/memory/test_credentials.md suggests athlete@kinetic.test which will 422. Recommend updating that doc to use example.com or @kinetic.app."},
+      {"endpoint": "POST /api/sessions", "issue": "If GPT-5.2 returns malformed JSON, ai_service falls back silently to a stub analysis (form_score=70) without surfacing a flag in the response. Consider adding 'analysis_fallback': true so frontend can show a retry hint."},
+      {"endpoint": "POST /api/sessions/{id}/training-plan", "issue": "No idempotency / dedup. Calling it twice creates two docs in db.training_plans for the same session (the session.training_plan field is overwritten with the latest, but old plans remain in the collection). Low priority."},
+      {"endpoint": "PATCH /api/goals/{id}", "issue": "Returns goal without filtering by user_id in the read-back find_one (line 342). Functionally fine because the update is gated by user_id, but for consistency the read should also include user_id."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "Update /app/memory/test_credentials.md to recommend @example.com (not @kinetic.test) so future agents/users do not hit Pydantic EmailStr 422 errors.",
+    "(Optional) Surface a fallback flag in analyze_form when JSON parsing fails so the UI can show a 'retry analysis' hint.",
+    "(Optional) Make POST /api/sessions/{id}/training-plan upsert in db.training_plans by session_id to avoid duplicate plan rows."
+  ],
+  "critical_code_review_comments": [
+    "auth.py decode_token raises HTTPException inside an except-from-other-exception, but uses bare 'raise HTTPException(...)'. That works (FastAPI handles it) but ruff B904 may flag it. Not blocking.",
+    "server.py registers @app.on_event('shutdown') which is deprecated in FastAPI; consider lifespan handler.",
+    "ai_service.py uses a fresh LlmChat per call (good for stateless calls). Ensure the LLM library is concurrency-safe under load; current single-call usage is fine.",
+    "server.py _compute_streak imports datetime.date inside the loop; minor style nit, lift to top-level import.",
+    "Sessions list is capped at 200 and dashboard at 500 with no pagination — acceptable for MVP but document the limit."
+  ],
+  "updated_files": [
+    "/app/backend/tests/__init__.py",
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "not tested (per request)"},
+  "test_credentials": "Tests register their own users with @example.com emails (e.g. TEST_alpha_<hex>@example.com / Pass1234!). Note: @kinetic.test recommended in /app/memory/test_credentials.md will fail Pydantic EmailStr validation.",
+  "seed_data_creation": "No persistent seed; each pytest run creates 2 fresh TEST_alpha_*/TEST_beta_* users plus 1 session, 1 training plan, and ~5 goals on user_a. All entries are TEST_-prefixed for easy cleanup.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run with: REACT_APP_BACKEND_URL=<public> pytest /app/backend/tests/backend_test.py -v. Total runtime ~70s (dominated by 2 live GPT-5.2 calls). All endpoints in the review request are covered. If adding new tests, register users with @example.com (not @kinetic.test).",
+  "rca of the issue": "Initial pytest run had 22 errors due to test data using @kinetic.test domain — Pydantic v2 EmailStr (via email-validator) rejects the .test reserved TLD. Fixed by switching test emails to @example.com. Three additional minor failures were due to backend correctly lower-casing emails before storage; tests were updated to assert against email.lower(). Final run: 29/29 pass."
+}
