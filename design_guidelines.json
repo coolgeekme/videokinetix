@@ -1,0 +1,110 @@
+{
+  "theme": "dark",
+  "archetype": "2 (Performance Pro)",
+  "rationale": "High-energy, command-center feel tailored for an athletic, sport-agnostic AI mocap platform. Emphasizes tactical minimalism and high-contrast metrics.",
+  "colors": {
+    "background": "#0A0A0A",
+    "surface": "#121212",
+    "surface_secondary": "#1A1A1A",
+    "primary": "#FF3B30",
+    "primary_hover": "#FF5C53",
+    "secondary": "#007AFF",
+    "accent_green": "#00FF88",
+    "accent_amber": "#FFAB00",
+    "text_primary": "#FFFFFF",
+    "text_secondary": "#A1A1AA",
+    "text_muted": "#52525B",
+    "border": "#27272A"
+  },
+  "typography": {
+    "font_headings": "Barlow Condensed",
+    "font_body": "Manrope",
+    "font_mono": "JetBrains Mono",
+    "scale": {
+      "h1": "text-5xl sm:text-6xl uppercase tracking-tighter font-black",
+      "h2": "text-3xl sm:text-4xl uppercase tracking-tight font-black",
+      "h3": "text-2xl tracking-tight font-bold",
+      "h4": "text-xl font-bold",
+      "body": "text-base tracking-normal font-normal",
+      "small": "text-sm tracking-wide",
+      "overline": "text-xs uppercase tracking-[0.2em] text-text_secondary font-bold"
+    }
+  },
+  "spacing_and_layout": {
+    "marketing_page": {
+      "grid_mode": "Tetris Grid",
+      "gap": "gap-8 md:gap-12",
+      "container_padding": "py-24 px-6 sm:px-12",
+      "hero_layout": "Asymmetrical split. Large typography on left, overlapping motion-capture image on right. Image must have max overlay opacity bg-black/40."
+    },
+    "dashboard": {
+      "grid_mode": "Control Room Grid",
+      "gap": "gap-4 sm:gap-6",
+      "container_padding": "p-4 sm:p-6",
+      "widget_radius": "rounded-sm",
+      "widget_border": "border border-border/40"
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-white font-headings uppercase tracking-wide px-8 py-3 rounded-none hover:bg-primary_hover transition-colors",
+      "secondary": "bg-transparent border border-white/20 text-white font-headings uppercase tracking-wide px-8 py-3 rounded-none hover:bg-white/5 transition-colors"
+    },
+    "cards": {
+      "marketing": "bg-surface_secondary p-8 rounded-none border border-white/10 relative overflow-hidden",
+      "dashboard_widget": "bg-surface p-6 rounded-sm border border-white/5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]"
+    },
+    "data_visualization": {
+      "traffic_light_status": "Strict hierarchy: Green (#00FF88) for good/improvement, Amber (#FFAB00) for watch/plateau, Red (#FF3B30) for poor form/injury risk. Include 20x20px sparklines inline with metrics."
+    },
+    "surfaces": {
+      "header": "backdrop-blur-xl bg-background/80 border-b border-white/10 sticky top-0 z-50",
+      "footer": "bg-black py-20 border-t border-white/10",
+      "mocap_overlay": "Tactical Grid overlay. Transparent background with neon accents."
+    }
+  },
+  "motion_and_interactions": {
+    "hover": "High contrast shifts. Explicitly define hover text colors (e.g., hover:text-white). Buttons use scale transition (active:scale-[0.98]).",
+    "page_transitions": "Staggered fade-in and slide-up for dashboard widgets and marketing list items.",
+    "marquee": "Use a kinetic texture marquee: Massive outline text (text-8xl+ font-black text-transparent stroke-white/10) running in the background for high-energy marketing sections."
+  },
+  "media": {
+    "image_urls": {
+      "hero_mocap": {
+        "url": "https://images.unsplash.com/photo-1776935889501-68e5607fa42a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2MzR8MHwxfHNlYXJjaHwzfHxhdGhsZXRlJTIwcnVubmluZyUyMGRhcmt8ZW58MHx8fHwxNzc4MTUzODc5fDA&ixlib=rb-4.1.0&q=85",
+        "description": "Athlete running in the dark - Use as main marketing hero background with black/40 overlay.",
+        "category": "hero"
+      },
+      "sport_basketball": {
+        "url": "https://images.unsplash.com/photo-1519432473078-0151c4f90335?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwzfHxiYXNrZXRiYWxsJTIwcGxheWVyJTIwZGFya3xlbnwwfHx8fDE3NzgxNTM5MDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Basketball player dribbling - Use in Sport Selection or Session History cards.",
+        "category": "feature"
+      },
+      "sport_sprinting": {
+        "url": "https://images.pexels.com/photos/15875672/pexels-photo-15875672.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+        "description": "Silhouette of man jogging - Use for general athletic/performance tracking promo.",
+        "category": "feature"
+      },
+      "dashboard_abstract_grid": {
+        "url": "https://images.unsplash.com/photo-1766898588954-76c299003121?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzR8MHwxfHNlYXJjaHwxfHxkYXRhJTIwZ3JpZCUyMGFic3RyYWN0fGVufDB8fHx8MTc3ODE1MzkwNHww&ixlib=rb-4.1.0&q=85",
+        "description": "Abstract grid - Use as subtle 10% opacity background texture for AI analysis report section.",
+        "category": "background"
+      },
+      "brand_logo": {
+        "url": "https://images.unsplash.com/photo-1760037028517-e5cc6e3ebd3e?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzV8MHwxfHNlYXJjaHwxfHxzcG9ydHMlMjB0ZWNoJTIwbG9nb3xlbnwwfHx8fDE3NzgxNTM5MDR8MA&ixlib=rb-4.1.0&q=85",
+        "description": "Minimalist tech logo - Use in header and footer as platform logo.",
+        "category": "logo"
+      }
+    }
+  },
+  "instructions_to_main_agent": [
+    "Install required fonts from Google Fonts: 'Barlow Condensed' for headings, 'Manrope' for body.",
+    "Install lucide-react for standard icons.",
+    "Do NOT use the Shadcn Card component for marketing sections; use raw div/section with pure Tailwind for the Tetris Grid layout.",
+    "For the live webcam MediaPipe mocap view, position the video absolutely within a relative container, overlaid with an SVG or Canvas for the skeleton.",
+    "All interactive elements (buttons, sport selector, video upload, nav links) MUST have data-testid attributes (e.g., data-testid='sport-select-basketball').",
+    "Use Recharts for the form score progress charts, styled with the dark theme colors (#0A0A0A background, #00FF88 line/bars).",
+    "Do NOT use soft drop shadows (shadow-lg, shadow-xl). Rely on 1px solid strokes (border-white/10) and inner highlights (shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]).",
+    "Implement pure CSS or framer-motion kinetic marquee for the marketing page (e.g., repeating 'ANALYZE • PERFORM • DOMINATE')."
+  ]
+}
