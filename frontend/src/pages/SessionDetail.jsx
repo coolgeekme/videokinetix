@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
-import { ChevronLeft, Sparkles, Loader2 } from "lucide-react";
+import { ChevronLeft, Sparkles, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 const SEVERITY = {
@@ -12,9 +12,12 @@ const SEVERITY = {
 
 export default function SessionDetail() {
   const { id } = useParams();
+  const nav = useNavigate();
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deletingPlan, setDeletingPlan] = useState(false);
 
   useEffect(() => {
     api
@@ -36,6 +39,34 @@ export default function SessionDetail() {
     }
   };
 
+  const deleteSession = async () => {
+    if (!window.confirm("Delete this session and its training plan? This cannot be undone.")) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/sessions/${id}`);
+      toast.success("Session deleted");
+      nav("/app/sessions");
+    } catch {
+      toast.error("Failed to delete");
+      setDeleting(false);
+    }
+  };
+
+  const deletePlan = async () => {
+    if (!session?.training_plan?.id) return;
+    if (!window.confirm("Delete this training plan?")) return;
+    setDeletingPlan(true);
+    try {
+      await api.delete(`/training-plans/${session.training_plan.id}`);
+      setSession((s) => ({ ...s, training_plan: null }));
+      toast.success("Plan deleted");
+    } catch {
+      toast.error("Failed to delete plan");
+    } finally {
+      setDeletingPlan(false);
+    }
+  };
+
   if (loading)
     return <p className="text-sm text-zinc-500">Loading…</p>;
   if (!session)
@@ -48,13 +79,23 @@ export default function SessionDetail() {
 
   return (
     <div className="space-y-8">
-      <Link
-        to="/app/sessions"
-        data-testid="back-sessions"
-        className="inline-flex items-center gap-1 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-white"
-      >
-        <ChevronLeft className="w-4 h-4" /> All sessions
-      </Link>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <Link
+          to="/app/sessions"
+          data-testid="back-sessions"
+          className="inline-flex items-center gap-1 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-white"
+        >
+          <ChevronLeft className="w-4 h-4" /> All sessions
+        </Link>
+        <button
+          data-testid="delete-session-btn"
+          onClick={deleteSession}
+          disabled={deleting}
+          className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-[#ff3b30] border border-white/10 hover:border-[#ff3b30]/40 px-3 py-1.5 transition-colors disabled:opacity-40"
+        >
+          <Trash2 className="w-4 h-4" /> Delete session
+        </button>
+      </div>
 
       <div className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 bg-[#121212] border border-white/10 p-6">
@@ -207,6 +248,16 @@ export default function SessionDetail() {
                       <Sparkles className="w-4 h-4" /> Generate AI plan
                     </>
                   )}
+                </button>
+              )}
+              {session.training_plan && (
+                <button
+                  data-testid="delete-plan-btn"
+                  onClick={deletePlan}
+                  disabled={deletingPlan}
+                  className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-[#ff3b30] border border-white/10 hover:border-[#ff3b30]/40 px-3 py-1.5 transition-colors disabled:opacity-40"
+                >
+                  <Trash2 className="w-4 h-4" /> Delete plan
                 </button>
               )}
             </div>

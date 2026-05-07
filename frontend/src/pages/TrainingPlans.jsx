@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Sparkles } from "lucide-react";
+import { Sparkles, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 export default function TrainingPlans() {
   const [plans, setPlans] = useState([]);
@@ -13,6 +14,19 @@ export default function TrainingPlans() {
       .then((r) => setPlans(r.data.plans))
       .finally(() => setLoading(false));
   }, []);
+
+  const handleDelete = async (e, id) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm("Delete this training plan?")) return;
+    try {
+      await api.delete(`/training-plans/${id}`);
+      setPlans((arr) => arr.filter((p) => p.id !== id));
+      toast.success("Plan deleted");
+    } catch {
+      toast.error("Failed to delete");
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -44,34 +58,43 @@ export default function TrainingPlans() {
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {plans.map((p) => (
-            <Link
+            <div
               key={p.id}
-              to={`/app/sessions/${p.session_id}`}
               data-testid={`plan-card-${p.id}`}
-              className="group border border-white/10 bg-[#121212] p-5 hover:border-[#ff3b30] transition-colors"
+              className="relative group border border-white/10 bg-[#121212] p-5 hover:border-[#ff3b30] transition-colors"
             >
-              <div className="text-[10px] uppercase tracking-widest text-[#ffab00] font-display font-bold">
-                {p.sport} · {p.duration_days} days
-              </div>
-              <h3 className="mt-2 font-display font-black uppercase tracking-tight text-xl group-hover:text-[#ff3b30] transition-colors">
-                {p.title}
-              </h3>
-              {p.focus_areas?.length > 0 && (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {p.focus_areas.slice(0, 3).map((f, i) => (
-                    <span
-                      key={i}
-                      className="text-[10px] uppercase tracking-widest font-display font-bold border border-white/10 px-2 py-0.5 text-zinc-400"
-                    >
-                      {f}
-                    </span>
-                  ))}
+              <Link to={`/app/sessions/${p.session_id}`} className="block">
+                <div className="text-[10px] uppercase tracking-widest text-[#ffab00] font-display font-bold pr-8">
+                  {p.sport} · {p.duration_days} days
                 </div>
-              )}
-              <p className="mt-4 text-xs text-zinc-500 font-mono">
-                {new Date(p.created_at).toLocaleDateString()}
-              </p>
-            </Link>
+                <h3 className="mt-2 font-display font-black uppercase tracking-tight text-xl group-hover:text-[#ff3b30] transition-colors">
+                  {p.title}
+                </h3>
+                {p.focus_areas?.length > 0 && (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    {p.focus_areas.slice(0, 3).map((f, i) => (
+                      <span
+                        key={i}
+                        className="text-[10px] uppercase tracking-widest font-display font-bold border border-white/10 px-2 py-0.5 text-zinc-400"
+                      >
+                        {f}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-4 text-xs text-zinc-500 font-mono">
+                  {new Date(p.created_at).toLocaleDateString()}
+                </p>
+              </Link>
+              <button
+                data-testid={`delete-plan-${p.id}`}
+                onClick={(e) => handleDelete(e, p.id)}
+                className="absolute top-3 right-3 p-2 text-zinc-500 hover:text-[#ff3b30] hover:bg-white/5 transition-colors"
+                title="Delete plan"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
           ))}
         </div>
       )}

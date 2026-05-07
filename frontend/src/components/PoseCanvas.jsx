@@ -154,7 +154,11 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
         } else if (mode === "upload" && videoSrc) {
           video.src = videoSrc;
           video.loop = false;
-          await video.play().catch(() => {});
+          // wait for metadata so we can seek/play reliably on user gesture
+          await new Promise((resolve) => {
+            if (video.readyState >= 1) resolve();
+            else video.addEventListener("loadedmetadata", () => resolve(), { once: true });
+          });
         }
 
         setStatus("ready");
@@ -225,6 +229,34 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
     };
     setRunning(true);
     setStatus("running");
+    // For uploaded video: rewind & play (autoplay was likely blocked at init)
+    const v = videoRef.current;
+    if (v && mode === "upload") {
+      try {
+        v.currentTime = 0;
+      } catch {
+        /* ignore */
+      }
+      const playPromise = v.play();
+      if (playPromise && playPromise.catch) {
+        playPromise.catch(() => {
+          setError("Browser blocked auto-play. Tap the video, then press Start again.");
+        });
+      }
+      v.onended = () => {
+        // auto-stop when upload finishes
+        if (videoRef.current && !videoRef.current.paused) {
+          videoRef.current.pause();
+        }
+        // call stop only if still running
+        setRunning((r) => {
+          if (!r) return r;
+          // call stop logic on next tick to read latest metrics
+          setTimeout(() => stop(), 0);
+          return r;
+        });
+      };
+    }
   }
 
   function stop() {

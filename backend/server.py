@@ -225,6 +225,16 @@ async def get_session(session_id: str, user_id: str = Depends(get_current_user_i
     return s
 
 
+@api.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.sessions.delete_one({"id": session_id, "user_id": user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Session not found")
+    # cascade: remove training plans tied to this session
+    await db.training_plans.delete_many({"session_id": session_id, "user_id": user_id})
+    return {"deleted": True, "id": session_id}
+
+
 @api.post("/sessions/{session_id}/training-plan")
 async def make_training_plan(
     session_id: str,
@@ -248,6 +258,22 @@ async def list_training_plans(user_id: str = Depends(get_current_user_id)):
     cursor = db.training_plans.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1)
     items = await cursor.to_list(100)
     return {"plans": items}
+
+
+@api.delete("/training-plans/{plan_id}")
+async def delete_training_plan(plan_id: str, user_id: str = Depends(get_current_user_id)):
+    plan = await db.training_plans.find_one({"id": plan_id, "user_id": user_id}, {"_id": 0})
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    await db.training_plans.delete_one({"id": plan_id, "user_id": user_id})
+    # also clear from session's embedded copy if present
+    session_id = plan.get("session_id")
+    if session_id:
+        await db.sessions.update_one(
+            {"id": session_id, "user_id": user_id, "training_plan.id": plan_id},
+            {"$set": {"training_plan": None}},
+        )
+    return {"deleted": True, "id": plan_id}
 
 
 # ---------- Dashboard ----------
@@ -339,8 +365,16 @@ async def update_goal(goal_id: str, req: GoalUpdate, user_id: str = Depends(get_
     res = await db.goals.update_one({"id": goal_id, "user_id": user_id}, {"$set": update})
     if res.matched_count == 0:
         raise HTTPException(404, "Goal not found")
-    g = await db.goals.find_one({"id": goal_id}, {"_id": 0})
+    g = await db.goals.find_one({"id": goal_id, "user_id": user_id}, {"_id": 0})
     return g
+
+
+@api.delete("/goals/{goal_id}")
+async def delete_goal(goal_id: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.goals.delete_one({"id": goal_id, "user_id": user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Goal not found")
+    return {"deleted": True, "id": goal_id}
 
 
 # ---------- Health ----------

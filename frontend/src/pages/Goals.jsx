@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Target, Check, Plus } from "lucide-react";
+import { Target, Check, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 const SPORTS = ["basketball", "soccer", "swimming", "pickleball"];
@@ -43,6 +43,17 @@ export default function Goals() {
       progress: !g.completed ? 100 : 0,
     });
     refresh();
+  };
+
+  const remove = async (g) => {
+    if (!window.confirm("Delete this goal?")) return;
+    try {
+      await api.delete(`/goals/${g.id}`);
+      setGoals((arr) => arr.filter((x) => x.id !== g.id));
+      toast.success("Goal deleted");
+    } catch {
+      toast.error("Failed to delete");
+    }
   };
 
   return (
@@ -187,17 +198,27 @@ export default function Goals() {
                     </div>
                   )}
                 </div>
-                <button
-                  data-testid={`toggle-goal-${g.id}`}
-                  onClick={() => toggle(g)}
-                  className={`w-8 h-8 border flex items-center justify-center transition-colors ${
-                    g.completed
-                      ? "bg-[#00ff88] border-[#00ff88] text-black"
-                      : "border-white/20 hover:border-white/50"
-                  }`}
-                >
-                  {g.completed && <Check className="w-4 h-4" />}
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    data-testid={`delete-goal-${g.id}`}
+                    onClick={() => remove(g)}
+                    className="w-8 h-8 border border-white/10 hover:border-[#ff3b30] hover:text-[#ff3b30] text-zinc-400 flex items-center justify-center transition-colors"
+                    title="Delete goal"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                  <button
+                    data-testid={`toggle-goal-${g.id}`}
+                    onClick={() => toggle(g)}
+                    className={`w-8 h-8 border flex items-center justify-center transition-colors ${
+                      g.completed
+                        ? "bg-[#00ff88] border-[#00ff88] text-black"
+                        : "border-white/20 hover:border-white/50"
+                    }`}
+                  >
+                    {g.completed && <Check className="w-4 h-4" />}
+                  </button>
+                </div>
               </div>
             </div>
           ))}

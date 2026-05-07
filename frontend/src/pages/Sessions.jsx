@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
-import { Activity, ArrowRight } from "lucide-react";
+import { Activity, ArrowRight, Trash2 } from "lucide-react";
+import { toast } from "sonner";
 
 export default function Sessions() {
   const [sessions, setSessions] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState(null);
 
   useEffect(() => {
     api
@@ -13,6 +15,22 @@ export default function Sessions() {
       .then((r) => setSessions(r.data.sessions))
       .finally(() => setLoading(false));
   }, []);
+
+  const handleDelete = async (e, id) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!window.confirm("Delete this session and its training plan? This cannot be undone.")) return;
+    setDeletingId(id);
+    try {
+      await api.delete(`/sessions/${id}`);
+      setSessions((arr) => arr.filter((s) => s.id !== id));
+      toast.success("Session deleted");
+    } catch (err) {
+      toast.error("Failed to delete");
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   return (
     <div className="space-y-8">
@@ -74,7 +92,18 @@ export default function Sessions() {
                   </div>
                 </div>
               </div>
-              <ArrowRight className="w-5 h-5 text-zinc-500" />
+              <div className="flex items-center gap-2">
+                <button
+                  data-testid={`delete-session-${s.id}`}
+                  onClick={(e) => handleDelete(e, s.id)}
+                  disabled={deletingId === s.id}
+                  className="p-2 text-zinc-500 hover:text-[#ff3b30] hover:bg-white/5 transition-colors disabled:opacity-40"
+                  title="Delete session"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+                <ArrowRight className="w-5 h-5 text-zinc-500" />
+              </div>
             </Link>
           ))}
         </div>
