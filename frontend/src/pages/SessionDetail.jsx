@@ -15,6 +15,7 @@ export default function SessionDetail() {
   const { id } = useParams();
   const nav = useNavigate();
   const [session, setSession] = useState(null);
+  const [athlete, setAthlete] = useState(null);
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -23,7 +24,17 @@ export default function SessionDetail() {
   useEffect(() => {
     api
       .get(`/sessions/${id}`)
-      .then((r) => setSession(r.data))
+      .then(async (r) => {
+        setSession(r.data);
+        if (r.data.athlete_id) {
+          try {
+            const ar = await api.get(`/athletes/${r.data.athlete_id}`);
+            setAthlete(ar.data);
+          } catch {
+            /* athlete may have been deleted */
+          }
+        }
+      })
       .finally(() => setLoading(false));
   }, [id]);
 
