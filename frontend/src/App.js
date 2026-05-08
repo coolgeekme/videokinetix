@@ -8,6 +8,8 @@ import Landing from "@/pages/Landing";
 import Login from "@/pages/Login";
 import Register from "@/pages/Register";
 import Dashboard from "@/pages/Dashboard";
+import Athletes from "@/pages/Athletes";
+import AthleteDetail from "@/pages/AthleteDetail";
 import Capture from "@/pages/Capture";
 import Sessions from "@/pages/Sessions";
 import SessionDetail from "@/pages/SessionDetail";
@@ -33,6 +35,8 @@ function App() {
             >
               <Route index element={<Navigate to="/app/dashboard" replace />} />
               <Route path="dashboard" element={<Dashboard />} />
+              <Route path="athletes" element={<Athletes />} />
+              <Route path="athletes/:id" element={<AthleteDetail />} />
               <Route path="capture" element={<Capture />} />
               <Route path="sessions" element={<Sessions />} />
               <Route path="sessions/:id" element={<SessionDetail />} />

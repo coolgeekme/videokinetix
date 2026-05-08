@@ -1,24 +1,38 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { api } from "@/lib/api";
-import { errMsg } from "@/lib/api";
+import { useNavigate, useSearchParams, Link } from "react-router-dom";
+import { api, errMsg } from "@/lib/api";
 import SportPicker from "@/components/SportPicker";
 import PoseCanvas from "@/components/PoseCanvas";
-import { Upload, Camera, Loader2 } from "lucide-react";
+import { Upload, Camera, Loader2, ArrowRight, User } from "lucide-react";
 import { toast } from "sonner";
 
 export default function Capture() {
+  const [params] = useSearchParams();
+  const [athletes, setAthletes] = useState([]);
+  const [athleteId, setAthleteId] = useState(params.get("athlete") || null);
   const [sports, setSports] = useState([]);
-  const [sport, setSport] = useState(null);
-  const [mode, setMode] = useState("live"); // live | upload
+  const [sport, setSport] = useState(params.get("sport") || null);
+  const [mode, setMode] = useState("live");
   const [videoSrc, setVideoSrc] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
   const fileRef = useRef(null);
   const nav = useNavigate();
 
   useEffect(() => {
-    api.get("/sports").then((r) => setSports(r.data.sports));
+    Promise.all([api.get("/athletes"), api.get("/sports")]).then(
+      ([a, s]) => {
+        setAthletes(a.data.athletes);
+        setSports(s.data.sports);
+        // default to first athlete (Self) if none picked
+        if (!athleteId && a.data.athletes.length) {
+          setAthleteId(a.data.athletes[0].id);
+        }
+      }
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const selectedAthlete = athletes.find((a) => a.id === athleteId);
 
   const onUpload = (e) => {
     const file = e.target.files?.[0];
@@ -33,10 +47,11 @@ export default function Capture() {
   };
 
   const handleStop = async (summary) => {
-    if (!sport) return;
+    if (!sport || !athleteId) return;
     setAnalyzing(true);
     try {
       const { data } = await api.post("/sessions", {
+        athlete_id: athleteId,
         sport,
         mode,
         duration_seconds: summary.duration_seconds,
@@ -53,22 +68,100 @@ export default function Capture() {
 
   return (
     <div className="space-y-8">
+      {/* Step 1: athlete */}
       <div>
         <div className="text-[11px] uppercase tracking-widest text-[#ff3b30] font-display font-bold">
           Step 01
         </div>
         <h1 className="font-display font-black uppercase tracking-tighter text-4xl sm:text-5xl mt-1">
-          Choose your sport
+          Choose athlete
         </h1>
       </div>
 
-      <SportPicker sports={sports} value={sport} onChange={setSport} />
+      {athletes.length === 0 ? (
+        <div className="border border-white/10 bg-[#121212] p-8">
+          <p className="text-sm text-zinc-400">
+            No athletes yet —{" "}
+            <Link
+              to="/app/athletes"
+              className="text-[#ff3b30] hover:text-[#ff5c53] font-display uppercase tracking-wide"
+            >
+              add one first
+            </Link>
+            .
+          </p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">
+          {athletes.map((a) => {
+            const active = athleteId === a.id;
+            return (
+              <button
+                key={a.id}
+                data-testid={`pick-athlete-${a.id}`}
+                onClick={() => {
+                  setAthleteId(a.id);
+                  if (a.primary_sport && !sport) setSport(a.primary_sport);
+                }}
+                className={`p-4 border text-left transition-colors flex items-center gap-3 ${
+                  active
+                    ? "border-[#ff3b30] bg-[#ff3b30]/5"
+                    : "border-white/10 bg-[#121212] hover:border-white/30"
+                }`}
+              >
+                <div
+                  className={`w-9 h-9 flex items-center justify-center font-display font-black ${
+                    a.is_self ? "bg-[#ff3b30] text-white" : "bg-white/5 border border-white/10"
+                  }`}
+                >
+                  {a.name?.[0]?.toUpperCase() || "?"}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-display font-bold uppercase tracking-tight truncate">
+                    {a.name}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold">
+                    {a.is_self ? "You" : a.primary_sport || "Athlete"}
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+          <Link
+            to="/app/athletes"
+            className="p-4 border border-dashed border-white/15 bg-transparent hover:border-white/40 text-zinc-400 hover:text-white flex items-center gap-2 text-sm font-display uppercase tracking-wide transition-colors"
+            data-testid="manage-athletes-link"
+          >
+            <User className="w-4 h-4" /> Manage athletes <ArrowRight className="w-4 h-4 ml-auto" />
+          </Link>
+        </div>
+      )}
 
-      {sport && (
+      {/* Step 2: sport */}
+      {athleteId && (
         <>
           <div>
             <div className="text-[11px] uppercase tracking-widest text-[#ff3b30] font-display font-bold">
               Step 02
+            </div>
+            <h2 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-4xl mt-1">
+              Choose sport
+              {selectedAthlete && (
+                <span className="text-zinc-500 font-display text-xl ml-3">
+                  for {selectedAthlete.name}
+                </span>
+              )}
+            </h2>
+          </div>
+          <SportPicker sports={sports} value={sport} onChange={setSport} />
+        </>
+      )}
+
+      {athleteId && sport && (
+        <>
+          <div>
+            <div className="text-[11px] uppercase tracking-widest text-[#ff3b30] font-display font-bold">
+              Step 03
             </div>
             <h2 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-4xl mt-1">
               Capture mode
@@ -130,7 +223,7 @@ export default function Capture() {
             <div className="space-y-4">
               <div>
                 <div className="text-[11px] uppercase tracking-widest text-[#ff3b30] font-display font-bold">
-                  Step 03
+                  Step 04
                 </div>
                 <h2 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-4xl mt-1">
                   Capture & analyze
@@ -138,7 +231,7 @@ export default function Capture() {
               </div>
 
               <PoseCanvas
-                key={`${mode}-${videoSrc || "live"}`}
+                key={`${mode}-${videoSrc || "live"}-${athleteId}-${sport}`}
                 mode={mode}
                 videoSrc={videoSrc}
                 onStop={handleStop}

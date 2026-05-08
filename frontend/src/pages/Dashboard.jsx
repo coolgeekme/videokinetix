@@ -3,28 +3,32 @@ import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import {
-  LineChart,
+  CartesianGrid,
   Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
 } from "recharts";
-import { Activity, Trophy, Flame, Target, ArrowRight } from "lucide-react";
+import {
+  Activity,
+  Trophy,
+  Flame,
+  Users,
+  ArrowRight,
+  Crown,
+} from "lucide-react";
 
 export default function Dashboard() {
   const { user } = useAuth();
-  const [stats, setStats] = useState(null);
-  const [recent, setRecent] = useState([]);
+  const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    Promise.all([api.get("/dashboard/stats"), api.get("/sessions")])
-      .then(([s, r]) => {
-        setStats(s.data);
-        setRecent(r.data.sessions.slice(0, 5));
-      })
+    api
+      .get("/dashboard/overview")
+      .then((r) => setData(r.data))
       .finally(() => setLoading(false));
   }, []);
 
@@ -37,10 +41,10 @@ export default function Dashboard() {
   }
 
   const cards = [
-    { l: "Sessions", v: stats.total_sessions, I: Activity, c: "#00ff88" },
-    { l: "Avg score", v: stats.average_score, I: Trophy, c: "#ff3b30" },
-    { l: "Best", v: stats.best_score, I: Trophy, c: "#ffab00" },
-    { l: "Streak (days)", v: stats.streak_days, I: Flame, c: "#007aff" },
+    { l: "Athletes", v: data.total_athletes, I: Users, c: "#007aff" },
+    { l: "Sessions", v: data.total_sessions, I: Activity, c: "#00ff88" },
+    { l: "Avg score", v: data.average_score, I: Trophy, c: "#ff3b30" },
+    { l: "Streak (days)", v: data.streak_days, I: Flame, c: "#ffab00" },
   ];
 
   return (
@@ -85,18 +89,18 @@ export default function Dashboard() {
         <div className="lg:col-span-2 bg-[#121212] border border-white/10 p-5">
           <div className="flex items-center justify-between mb-4">
             <h3 className="font-display font-bold uppercase tracking-tight text-lg">
-              Form score timeline
+              Form score timeline · all athletes
             </h3>
             <span className="text-[11px] uppercase tracking-widest text-zinc-500 font-mono">
-              Last {stats.timeline.length} sessions
+              {data.timeline.length} sessions
             </span>
           </div>
-          {stats.timeline.length === 0 ? (
+          {data.timeline.length === 0 ? (
             <EmptyChart />
           ) : (
             <div className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={stats.timeline}>
+                <LineChart data={data.timeline}>
                   <CartesianGrid stroke="#1f1f1f" />
                   <XAxis dataKey="date" stroke="#52525b" fontSize={11} />
                   <YAxis domain={[0, 100]} stroke="#52525b" fontSize={11} />
@@ -107,6 +111,10 @@ export default function Dashboard() {
                       borderRadius: 0,
                     }}
                     labelStyle={{ color: "#fff" }}
+                    formatter={(value, _name, item) => [
+                      `${value} (${item?.payload?.athlete_name || "—"})`,
+                      "score",
+                    ]}
                   />
                   <Line
                     type="monotone"
@@ -125,12 +133,12 @@ export default function Dashboard() {
           <h3 className="font-display font-bold uppercase tracking-tight text-lg mb-4">
             By sport
           </h3>
-          {Object.keys(stats.by_sport).length === 0 ? (
+          {Object.keys(data.by_sport).length === 0 ? (
             <p className="text-sm text-zinc-500">No sessions yet.</p>
           ) : (
             <ul className="space-y-3">
-              {Object.entries(stats.by_sport).map(([sport, count]) => {
-                const max = Math.max(...Object.values(stats.by_sport));
+              {Object.entries(data.by_sport).map(([sport, count]) => {
+                const max = Math.max(...Object.values(data.by_sport));
                 const pct = (count / max) * 100;
                 return (
                   <li key={sport}>
@@ -151,74 +159,90 @@ export default function Dashboard() {
               })}
             </ul>
           )}
-          <div className="mt-6 border-t border-white/10 pt-5">
-            <div className="flex items-center gap-2 text-[11px] uppercase tracking-widest font-display font-bold text-zinc-400">
-              <Target className="w-4 h-4 text-[#00ff88]" />
-              Goals
-            </div>
-            <div className="mt-2 font-mono text-sm text-zinc-300">
-              {stats.goals_completed} / {stats.goals_total} completed
-            </div>
-          </div>
         </div>
       </div>
 
-      <div className="bg-[#121212] border border-white/10 p-5">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="font-display font-bold uppercase tracking-tight text-lg">
-            Recent sessions
+      {/* Leaderboard */}
+      <div className="bg-[#121212] border border-white/10">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+          <h3 className="font-display font-bold uppercase tracking-tight text-lg flex items-center gap-2">
+            <Crown className="w-4 h-4 text-[#ffab00]" /> Athlete leaderboard
           </h3>
           <Link
-            to="/app/sessions"
-            data-testid="view-all-sessions"
+            to="/app/athletes"
+            data-testid="dashboard-manage-athletes"
             className="text-xs uppercase tracking-widest font-display font-bold text-[#ff3b30] hover:text-[#ff5c53]"
           >
-            View all →
+            Manage roster →
           </Link>
         </div>
-        {recent.length === 0 ? (
-          <p className="text-sm text-zinc-500">
-            No sessions yet —{" "}
-            <Link to="/app/capture" className="text-[#ff3b30]">
-              start your first capture
-            </Link>
-            .
-          </p>
+        {data.leaderboard.length === 0 ? (
+          <p className="text-sm text-zinc-500 p-5">No athletes yet.</p>
         ) : (
-          <ul className="divide-y divide-white/5">
-            {recent.map((s) => (
-              <li key={s.id} className="py-3 flex items-center justify-between">
-                <div>
-                  <div className="font-display uppercase tracking-tight font-bold">
-                    {s.sport}
-                  </div>
-                  <div className="text-xs text-zinc-500 font-mono">
-                    {new Date(s.created_at).toLocaleString()}
-                  </div>
-                </div>
+          <div className="divide-y divide-white/5">
+            {data.leaderboard.map((row, i) => (
+              <Link
+                key={row.athlete_id}
+                to={`/app/athletes/${row.athlete_id}`}
+                data-testid={`leaderboard-row-${row.athlete_id}`}
+                className="flex items-center justify-between px-5 py-4 hover:bg-white/5 transition-colors"
+              >
                 <div className="flex items-center gap-4">
-                  <span
-                    className={`font-display font-black text-2xl ${
-                      s.form_score >= 80
-                        ? "text-[#00ff88]"
-                        : s.form_score >= 60
-                          ? "text-[#ffab00]"
-                          : "text-[#ff3b30]"
+                  <div
+                    className={`font-display font-black text-2xl w-8 ${
+                      i === 0
+                        ? "text-[#ffab00]"
+                        : i === 1
+                          ? "text-zinc-300"
+                          : i === 2
+                            ? "text-orange-400"
+                            : "text-zinc-600"
                     }`}
                   >
-                    {s.form_score}
-                  </span>
-                  <Link
-                    to={`/app/sessions/${s.id}`}
-                    data-testid={`view-session-${s.id}`}
-                    className="text-xs uppercase font-display tracking-widest font-bold text-zinc-300 hover:text-white border border-white/10 px-3 py-1.5 transition-colors hover:bg-white/5"
+                    {i + 1}
+                  </div>
+                  <div
+                    className={`w-9 h-9 flex items-center justify-center font-display font-black ${
+                      row.is_self
+                        ? "bg-[#ff3b30] text-white"
+                        : "bg-white/5 border border-white/10"
+                    }`}
                   >
-                    View
-                  </Link>
+                    {row.name?.[0]?.toUpperCase() || "?"}
+                  </div>
+                  <div>
+                    <div className="font-display font-bold uppercase tracking-tight">
+                      {row.name}
+                      {row.is_self && (
+                        <span className="ml-2 text-[10px] tracking-widest text-[#ff3b30]">
+                          YOU
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-zinc-500 font-mono">
+                      {row.sessions} sessions
+                    </div>
+                  </div>
                 </div>
-              </li>
+                <div className="text-right">
+                  <div
+                    className={`font-display font-black text-2xl ${
+                      row.avg_score >= 80
+                        ? "text-[#00ff88]"
+                        : row.avg_score >= 60
+                          ? "text-[#ffab00]"
+                          : "text-zinc-500"
+                    }`}
+                  >
+                    {row.avg_score || "—"}
+                  </div>
+                  <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold">
+                    avg · best {row.best_score}
+                  </div>
+                </div>
+              </Link>
             ))}
-          </ul>
+          </div>
         )}
       </div>
     </div>

@@ -102,6 +102,15 @@ export default function SessionDetail() {
         <div className="lg:col-span-1 bg-[#121212] border border-white/10 p-6">
           <div className="text-[11px] uppercase tracking-widest text-zinc-400 font-display font-bold">
             Form score
+            {athlete && (
+              <Link
+                to={`/app/athletes/${athlete.id}`}
+                className="ml-2 text-[#ff3b30] hover:text-[#ff5c53] normal-case"
+                data-testid="session-athlete-link"
+              >
+                · {athlete.name}
+              </Link>
+            )}
           </div>
           <div
             className="font-display font-black text-8xl mt-2 leading-none"
@@ -358,3 +367,4 @@ function PlanView({ plan }) {
     </div>
   );
 }
+

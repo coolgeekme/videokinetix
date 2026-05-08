@@ -1,9 +1,10 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { LayoutDashboard, Camera, ListChecks, Target, LogOut, Activity } from "lucide-react";
+import { LayoutDashboard, Camera, ListChecks, Target, LogOut, Activity, Users } from "lucide-react";
 
 const NAV = [
   { to: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
+  { to: "/app/athletes", label: "Athletes", icon: Users, testid: "nav-athletes" },
   { to: "/app/capture", label: "Capture", icon: Camera, testid: "nav-capture" },
   { to: "/app/sessions", label: "Sessions", icon: Activity, testid: "nav-sessions" },
   { to: "/app/training-plans", label: "Training", icon: ListChecks, testid: "nav-training" },
