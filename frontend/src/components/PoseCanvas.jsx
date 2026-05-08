@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { SwitchCamera } from "lucide-react";
 
 /**
  * Loads MediaPipe Pose via CDN (lazy) and renders a live skeleton overlay on
@@ -52,6 +53,9 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
   const [status, setStatus] = useState("idle"); // idle | loading | ready | running | error
   const [error, setError] = useState(null);
   const [duration, setDuration] = useState(0);
+  const [facing, setFacing] = useState("user"); // "user" (front) | "environment" (back)
+  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const [switching, setSwitching] = useState(false);
 
   function angle(a, b, c) {
     const ab = { x: a.x - b.x, y: a.y - b.y };
@@ -144,13 +148,30 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
 
         const video = videoRef.current;
         if (mode === "live") {
+          // detect available cameras (only after permission grant works reliably,
+          // but enumerateDevices returns labels only after that)
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cams = devices.filter((d) => d.kind === "videoinput");
+            setHasMultipleCameras(cams.length > 1);
+          } catch {
+            /* ignore */
+          }
           const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 1280, height: 720, facingMode: "user" },
+            video: { width: 1280, height: 720, facingMode: facing },
             audio: false,
           });
           streamRef.current = stream;
           video.srcObject = stream;
           await video.play();
+          // re-check camera count post-permission so labels populate
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const cams = devices.filter((d) => d.kind === "videoinput");
+            setHasMultipleCameras(cams.length > 1);
+          } catch {
+            /* ignore */
+          }
         } else if (mode === "upload" && videoSrc) {
           video.src = videoSrc;
           video.loop = false;
@@ -298,6 +319,10 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
           ref={videoRef}
           data-testid="pose-video"
           className="absolute inset-0 w-full h-full object-cover"
+          style={{
+            transform:
+              mode === "live" && facing === "user" ? "scaleX(-1)" : "none",
+          }}
           playsInline
           muted
           controls={mode === "upload"}
@@ -306,6 +331,10 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
           ref={canvasRef}
           data-testid="pose-canvas"
           className="absolute inset-0 w-full h-full"
+          style={{
+            transform:
+              mode === "live" && facing === "user" ? "scaleX(-1)" : "none",
+          }}
         />
         {/* tactical grid */}
         <div className="absolute inset-0 pointer-events-none grid-bg opacity-30" />
@@ -328,6 +357,34 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
                     : "Idle"}
           </span>
         </div>
+
+        {/* camera switch (live only) */}
+        {mode === "live" && !error && (
+          <button
+            type="button"
+            data-testid="camera-switch-btn"
+            onClick={() => {
+              if (running || switching) return;
+              setSwitching(true);
+              setFacing((f) => (f === "user" ? "environment" : "user"));
+              setTimeout(() => setSwitching(false), 600);
+            }}
+            disabled={running || switching}
+            className="absolute top-3 right-3 inline-flex items-center gap-2 bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 px-3 py-1.5 transition-colors"
+            title={
+              running
+                ? "Stop recording before switching cameras"
+                : facing === "user"
+                  ? "Switch to back camera"
+                  : "Switch to front camera"
+            }
+          >
+            <SwitchCamera className="w-4 h-4" />
+            <span className="text-[11px] font-display uppercase tracking-widest font-bold">
+              {facing === "user" ? "Front" : "Back"}
+            </span>
+          </button>
+        )}
         {error && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 text-center p-6">
             <p className="text-sm text-red-400 max-w-md">{error}</p>
