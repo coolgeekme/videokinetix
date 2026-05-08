@@ -377,6 +377,11 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
 
     analysis = await analyze_form(req.sport, req.pose_summary or {"note": "minimal pose data"})
 
+    # Pull keyframes (base64 images) out of the raw pose summary so we can store them
+    # at the top-level of the session doc, and keep the pose_summary lighter.
+    pose_summary_clean = {k: v for k, v in (req.pose_summary or {}).items() if k != "keyframes"}
+    keyframes = (req.pose_summary or {}).get("keyframes") or {}
+
     session_id = str(uuid.uuid4())
     doc = {
         "id": session_id,
@@ -385,7 +390,11 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
         "sport": req.sport,
         "mode": req.mode,
         "duration_seconds": req.duration_seconds,
-        "pose_summary": req.pose_summary,
+        "pose_summary": pose_summary_clean,
+        "keyframes": keyframes,
+        "rep_count": pose_summary_clean.get("rep_count", 0),
+        "reps": pose_summary_clean.get("reps", []),
+        "consistency": pose_summary_clean.get("consistency"),
         "notes": req.notes,
         "analysis": analysis,
         "form_score": int(analysis.get("form_score", 70)),

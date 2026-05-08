@@ -139,9 +139,11 @@ export default function SessionDetail() {
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold">
-                Mode
+                Reps
               </div>
-              <div className="capitalize font-display font-bold mt-1">{session.mode}</div>
+              <div className="font-display font-bold mt-1">
+                {session.rep_count ?? 0}
+              </div>
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold">
@@ -153,21 +155,40 @@ export default function SessionDetail() {
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold">
-                Frames
+                Consistency
               </div>
               <div className="font-display font-bold mt-1">
-                {session.pose_summary?.frames_processed ?? 0}
+                {session.consistency != null ? `${session.consistency}%` : "—"}
               </div>
             </div>
           </div>
-          <div className="mt-6 border-t border-white/10 pt-4 space-y-2 text-xs font-mono text-zinc-400">
-            {Object.entries(session.pose_summary || {}).slice(0, 8).map(([k, v]) => (
-              <div key={k} className="flex justify-between">
-                <span className="text-zinc-500">{k}</span>
-                <span>{typeof v === "number" ? v.toFixed(2) : String(v)}</span>
+          {/* Rep score sparkline */}
+          {Array.isArray(session.reps) && session.reps.length > 0 && (
+            <div className="mt-6 border-t border-white/10 pt-4">
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold mb-2">
+                Per-rep score
               </div>
-            ))}
-          </div>
+              <div className="flex items-end gap-1 h-16" data-testid="rep-sparkline">
+                {session.reps.map((r) => {
+                  const s = r.score ?? 0;
+                  const color =
+                    s >= 80 ? "#00ff88" : s >= 60 ? "#ffab00" : "#ff3b30";
+                  return (
+                    <div
+                      key={r.index}
+                      title={`Rep ${r.index}: ${s}`}
+                      className="flex-1 transition-opacity hover:opacity-80"
+                      style={{
+                        height: `${Math.max(6, s)}%`,
+                        background: color,
+                        minWidth: 4,
+                      }}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="lg:col-span-2 space-y-6">
@@ -195,6 +216,72 @@ export default function SessionDetail() {
               </div>
             )}
           </div>
+
+          {/* Visual evidence: best vs worst rep */}
+          {(session.keyframes?.best_rep || session.keyframes?.worst_rep) && (
+            <div className="bg-[#121212] border border-white/10 p-6">
+              <h3 className="font-display font-bold uppercase tracking-tight text-lg">
+                Visual evidence
+              </h3>
+              <p className="text-xs text-zinc-500 mt-1">
+                Skeleton frame at the apex of your best vs worst rep.
+              </p>
+              <div className="mt-4 grid sm:grid-cols-2 gap-4">
+                {session.keyframes?.best_rep && (
+                  <KeyframeCard
+                    label="Best rep"
+                    accent="#00ff88"
+                    data={session.keyframes.best_rep}
+                  />
+                )}
+                {session.keyframes?.worst_rep && (
+                  <KeyframeCard
+                    label="Worst rep"
+                    accent="#ff3b30"
+                    data={session.keyframes.worst_rep}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* AI rep callouts */}
+          {Array.isArray(a.rep_callouts) && a.rep_callouts.length > 0 && (
+            <div className="bg-[#121212] border border-white/10 p-6">
+              <h3 className="font-display font-bold uppercase tracking-tight text-lg">
+                Rep callouts
+              </h3>
+              <ul className="mt-3 space-y-2">
+                {a.rep_callouts.map((c, i) => (
+                  <li
+                    key={i}
+                    data-testid={`rep-callout-${i}`}
+                    className="flex items-start gap-3 text-sm"
+                  >
+                    <span
+                      className="font-display font-black w-12 text-right"
+                      style={{
+                        color:
+                          c.label === "best"
+                            ? "#00ff88"
+                            : c.label === "worst"
+                              ? "#ff3b30"
+                              : "#ffab00",
+                      }}
+                    >
+                      #{c.rep_index}
+                    </span>
+                    <span className="text-zinc-300 flex-1">
+                      <span className="text-[10px] uppercase tracking-widest font-display font-bold text-zinc-500 mr-2">
+                        {c.label}
+                      </span>
+                      {c.comment}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {a.strengths?.length > 0 && (
             <div className="bg-[#121212] border border-white/10 p-6">
@@ -290,6 +377,40 @@ export default function SessionDetail() {
               </p>
             )}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function KeyframeCard({ label, accent, data }) {
+  return (
+    <div className="border border-white/10 bg-black/40">
+      {data.image && (
+        <img
+          src={data.image}
+          alt={label}
+          data-testid={`keyframe-${label.toLowerCase().replace(/\s/g, "-")}`}
+          className="w-full aspect-video object-cover"
+        />
+      )}
+      <div className="p-3 flex items-center justify-between">
+        <div>
+          <div
+            className="text-[10px] uppercase tracking-widest font-display font-bold"
+            style={{ color: accent }}
+          >
+            {label}
+          </div>
+          <div className="text-xs text-zinc-500 font-mono mt-0.5">
+            t = {data.time_s}s
+          </div>
+        </div>
+        <div
+          className="font-display font-black text-3xl"
+          style={{ color: accent }}
+        >
+          {data.score ?? "—"}
         </div>
       </div>
     </div>

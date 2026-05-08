@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { SwitchCamera } from "lucide-react";
+import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 /**
  * Loads MediaPipe Pose via CDN (lazy) and renders a live skeleton overlay on
@@ -30,25 +31,20 @@ function loadPoseLib() {
   return poseLoaderPromise;
 }
 
-export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onReady }) {
+export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, sport = "basketball", onReady }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const poseRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
-  const metricsRef = useRef({
-    frames: 0,
-    detected: 0,
-    visibilitySum: 0,
-    leftKneeAngles: [],
-    rightKneeAngles: [],
-    leftElbowAngles: [],
-    rightElbowAngles: [],
-    shoulderTilts: [],
-    hipTilts: [],
-    started: null,
-  });
+  // Per-frame landmark buffer for rep analysis (only filled while running)
+  const framesRef = useRef([]);
+  // Thumbnail buffer for keyframe extraction in live mode (timestamp -> dataURL)
+  const thumbsRef = useRef([]);
+  const lastThumbAtRef = useRef(0);
+  const startedAtRef = useRef(null);
+  const runningRef = useRef(false);
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("idle"); // idle | loading | ready | running | error
   const [error, setError] = useState(null);
@@ -61,16 +57,6 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
   // Heuristic: front-facing if label looks like front/user/face, OR if no label yet (default user-facing)
   const isFrontCam = !currentCam || /front|user|face|selfie/i.test(currentCam.label || "");
 
-  function angle(a, b, c) {
-    const ab = { x: a.x - b.x, y: a.y - b.y };
-    const cb = { x: c.x - b.x, y: c.y - b.y };
-    const dot = ab.x * cb.x + ab.y * cb.y;
-    const magAB = Math.hypot(ab.x, ab.y);
-    const magCB = Math.hypot(cb.x, cb.y);
-    if (magAB === 0 || magCB === 0) return 0;
-    return (Math.acos(Math.min(1, Math.max(-1, dot / (magAB * magCB)))) * 180) / Math.PI;
-  }
-
   function drawResults(results) {
     const canvas = canvasRef.current;
     const video = videoRef.current;
@@ -82,7 +68,14 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
     const ctx = canvas.getContext("2d");
     ctx.clearRect(0, 0, w, h);
 
-    if (!results.poseLandmarks) return;
+    if (!results.poseLandmarks) {
+      // still record the empty frame so timestamps stay continuous
+      if (runningRef.current && startedAtRef.current != null) {
+        const t = (Date.now() - startedAtRef.current) / 1000;
+        framesRef.current.push({ t, lm: null });
+      }
+      return;
+    }
     const lm = results.poseLandmarks;
 
     // skeleton lines
@@ -110,22 +103,40 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
       ctx.fill();
     });
 
-    // metrics
-    const m = metricsRef.current;
-    m.frames += 1;
-    m.detected += 1;
-    const visibility = lm.reduce((s, p) => s + (p.visibility || 0), 0) / lm.length;
-    m.visibilitySum += visibility;
-
-    try {
-      m.leftKneeAngles.push(angle(lm[23], lm[25], lm[27]));
-      m.rightKneeAngles.push(angle(lm[24], lm[26], lm[28]));
-      m.leftElbowAngles.push(angle(lm[11], lm[13], lm[15]));
-      m.rightElbowAngles.push(angle(lm[12], lm[14], lm[16]));
-      m.shoulderTilts.push(Math.abs(lm[11].y - lm[12].y));
-      m.hipTilts.push(Math.abs(lm[23].y - lm[24].y));
-    } catch {
-      /* missing landmark */
+    // record landmarks for rep analysis if running
+    if (runningRef.current && startedAtRef.current != null) {
+      const t = (Date.now() - startedAtRef.current) / 1000;
+      framesRef.current.push({
+        t,
+        // copy minimum required fields for memory efficiency
+        lm: lm.map((p) => ({ x: p.x, y: p.y, visibility: p.visibility })),
+      });
+      // periodic thumbnail capture for keyframe extraction (live mode only)
+      if (mode === "live" && Date.now() - lastThumbAtRef.current > 200) {
+        lastThumbAtRef.current = Date.now();
+        try {
+          const tw = 640;
+          const th = Math.round((h / w) * tw);
+          const off = document.createElement("canvas");
+          off.width = tw;
+          off.height = th;
+          const octx = off.getContext("2d");
+          // mirror if front camera so saved thumb matches what user sees
+          if (isFrontCam) {
+            octx.translate(tw, 0);
+            octx.scale(-1, 1);
+          }
+          octx.drawImage(video, 0, 0, tw, th);
+          // overlay skeleton (reuse current canvas pixels scaled down)
+          octx.setTransform(1, 0, 0, 1, 0, 0);
+          octx.drawImage(canvas, 0, 0, tw, th);
+          thumbsRef.current.push({ t, dataUrl: off.toDataURL("image/jpeg", 0.7) });
+          // bound buffer to last 5 minutes worth (~1500 thumbs at 5fps)
+          if (thumbsRef.current.length > 1500) thumbsRef.current.shift();
+        } catch {
+          /* drawImage may throw if video not ready */
+        }
+      }
     }
   }
 
@@ -272,26 +283,19 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
 
   useEffect(() => {
     if (!running) return;
-    metricsRef.current.started = Date.now();
+    startedAtRef.current = Date.now();
     const interval = setInterval(() => {
-      setDuration(Math.floor((Date.now() - metricsRef.current.started) / 1000));
+      setDuration(Math.floor((Date.now() - startedAtRef.current) / 1000));
     }, 500);
     return () => clearInterval(interval);
   }, [running]);
 
   function start() {
-    metricsRef.current = {
-      frames: 0,
-      detected: 0,
-      visibilitySum: 0,
-      leftKneeAngles: [],
-      rightKneeAngles: [],
-      leftElbowAngles: [],
-      rightElbowAngles: [],
-      shoulderTilts: [],
-      hipTilts: [],
-      started: Date.now(),
-    };
+    framesRef.current = [];
+    thumbsRef.current = [];
+    lastThumbAtRef.current = 0;
+    startedAtRef.current = Date.now();
+    runningRef.current = true;
     setRunning(true);
     setStatus("running");
     // For uploaded video: rewind & play (autoplay was likely blocked at init)
@@ -309,14 +313,11 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
         });
       }
       v.onended = () => {
-        // auto-stop when upload finishes
         if (videoRef.current && !videoRef.current.paused) {
           videoRef.current.pause();
         }
-        // call stop only if still running
         setRunning((r) => {
           if (!r) return r;
-          // call stop logic on next tick to read latest metrics
           setTimeout(() => stop(), 0);
           return r;
         });
@@ -324,30 +325,93 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
     }
   }
 
-  function stop() {
+  async function captureThumbnailNear(timeS) {
+    // Try thumbnail buffer first (live mode); fallback to seeking video (upload mode)
+    const thumbs = thumbsRef.current;
+    if (thumbs.length) {
+      let best = thumbs[0];
+      let bestDist = Math.abs(best.t - timeS);
+      for (const th of thumbs) {
+        const d = Math.abs(th.t - timeS);
+        if (d < bestDist) {
+          best = th;
+          bestDist = d;
+        }
+      }
+      if (bestDist < 0.6) return best.dataUrl;
+    }
+    // Upload mode fallback: seek video element to that time and grab a frame
+    const v = videoRef.current;
+    const c = canvasRef.current;
+    if (mode === "upload" && v && c) {
+      try {
+        await new Promise((resolve) => {
+          const onSeeked = () => {
+            v.removeEventListener("seeked", onSeeked);
+            resolve();
+          };
+          v.addEventListener("seeked", onSeeked);
+          v.currentTime = Math.min(timeS, v.duration - 0.05);
+          // safety timeout
+          setTimeout(resolve, 800);
+        });
+        const tw = 640;
+        const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
+        const off = document.createElement("canvas");
+        off.width = tw;
+        off.height = th;
+        const octx = off.getContext("2d");
+        octx.drawImage(v, 0, 0, tw, th);
+        // overlay the latest skeleton canvas
+        octx.drawImage(c, 0, 0, tw, th);
+        return off.toDataURL("image/jpeg", 0.7);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async function stop() {
+    runningRef.current = false;
     setRunning(false);
     setStatus("ready");
-    const m = metricsRef.current;
-    const avg = (arr) =>
-      arr.length ? +(arr.reduce((s, v) => s + v, 0) / arr.length).toFixed(1) : 0;
+    const v = videoRef.current;
+    if (v && mode === "upload" && !v.paused) {
+      try {
+        v.pause();
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const frames = framesRef.current;
+    const detected = frames.filter((f) => f.lm).length;
+    const duration_s =
+      frames.length > 1 ? frames[frames.length - 1].t - frames[0].t : 0;
+
+    let analysis;
+    try {
+      analysis = analyzeSession(frames, sport);
+    } catch (e) {
+      console.error("rep analysis failed:", e);
+      analysis = { sport, rep_count: 0, reps: [], no_reps_detected: true };
+    }
+
+    // Capture keyframes for best/worst rep
+    const keyframes = {};
+    for (const k of getKeyframeTimestamps(analysis)) {
+      const dataUrl = await captureThumbnailNear(k.time_s);
+      if (dataUrl) keyframes[k.label] = { time_s: k.time_s, score: k.score, image: dataUrl };
+    }
+
     const summary = {
-      frames_processed: m.frames,
-      detection_rate: m.frames ? +(m.detected / m.frames).toFixed(2) : 0,
-      avg_visibility: m.frames ? +(m.visibilitySum / m.frames).toFixed(2) : 0,
-      avg_left_knee_angle: avg(m.leftKneeAngles),
-      avg_right_knee_angle: avg(m.rightKneeAngles),
-      avg_left_elbow_angle: avg(m.leftElbowAngles),
-      avg_right_elbow_angle: avg(m.rightElbowAngles),
-      avg_shoulder_tilt: avg(m.shoulderTilts),
-      avg_hip_tilt: avg(m.hipTilts),
-      symmetry_score:
-        m.leftKneeAngles.length && m.rightKneeAngles.length
-          ? +(
-              100 -
-              Math.abs(avg(m.leftKneeAngles) - avg(m.rightKneeAngles)) * 1.5
-            ).toFixed(1)
-          : 0,
-      duration_seconds: m.started ? (Date.now() - m.started) / 1000 : 0,
+      ...analysis,
+      frames_processed: frames.length,
+      frames_detected: detected,
+      detection_rate: frames.length ? +(detected / frames.length).toFixed(2) : 0,
+      duration_seconds: +duration_s.toFixed(2),
+      keyframes,
     };
     onStop?.(summary);
   }

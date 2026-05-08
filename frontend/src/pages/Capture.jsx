@@ -234,6 +234,7 @@ export default function Capture() {
                 key={`${mode}-${videoSrc || "live"}-${athleteId}-${sport}`}
                 mode={mode}
                 videoSrc={videoSrc}
+                sport={sport}
                 onStop={handleStop}
               />
 

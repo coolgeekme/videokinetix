@@ -17,19 +17,23 @@ MODEL_NAME = "gpt-5.2"
 SPORT_CONTEXT = {
     "basketball": {
         "key_metrics": "shooting elbow alignment, knee bend depth, follow-through, jump symmetry, balance",
-        "elite_benchmark": "Stephen Curry / Klay Thompson shooting form: 90° elbow, snap wrist, 45-55° launch angle.",
+        "elite_benchmark": "Stephen Curry / Klay Thompson shooting form: 90° elbow load → full extension at release, snap wrist, 45-55° launch angle.",
+        "rep_unit": "shot",
     },
     "soccer": {
         "key_metrics": "kick plant foot stability, hip rotation, ankle lock, knee drive, balance leg",
-        "elite_benchmark": "Cristiano Ronaldo / Megan Rapinoe striking form: full hip rotation, locked ankle, planted foot 6-8 inches beside ball.",
+        "elite_benchmark": "Cristiano Ronaldo / Megan Rapinoe striking form: full hip rotation, locked ankle, planted foot 6-8 inches beside ball, knee snap.",
+        "rep_unit": "kick",
     },
     "swimming": {
         "key_metrics": "stroke symmetry, hip rotation, arm catch angle, kick rhythm, head position",
-        "elite_benchmark": "Katie Ledecky / Caeleb Dressel freestyle: high elbow catch, 45° body roll, 6-beat kick.",
+        "elite_benchmark": "Katie Ledecky / Caeleb Dressel freestyle: high-elbow catch (110-130°), 45° body roll, 6-beat kick.",
+        "rep_unit": "stroke",
     },
     "pickleball": {
         "key_metrics": "paddle face, shoulder turn, knee bend, weight transfer, split step timing",
-        "elite_benchmark": "Ben Johns / Anna Leigh Waters mechanics: continental grip, compact backswing, low ready position.",
+        "elite_benchmark": "Ben Johns / Anna Leigh Waters mechanics: continental grip, compact backswing, low ready position (knee 130-150°).",
+        "rep_unit": "swing",
     },
 }
 
@@ -45,7 +49,6 @@ def _new_chat(system: str) -> LlmChat:
 
 
 def _parse_json(text: str) -> dict:
-    # strip code fences
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -55,47 +58,99 @@ def _parse_json(text: str) -> dict:
     return json.loads(text)
 
 
+def _compact_for_prompt(pose_summary: dict[str, Any]) -> dict[str, Any]:
+    """Drop fields too verbose for the LLM (e.g. base64 images) but keep rich rep data."""
+    out = {k: v for k, v in pose_summary.items() if k != "keyframes"}
+    # cap reps to 30 so prompt stays small
+    if isinstance(out.get("reps"), list) and len(out["reps"]) > 30:
+        out["reps"] = out["reps"][:30] + [{"_truncated": len(pose_summary["reps"]) - 30}]
+    return out
+
+
 async def analyze_form(sport: str, pose_summary: dict[str, Any]) -> dict:
-    """Analyze pose data summary and return form analysis JSON."""
-    ctx = SPORT_CONTEXT.get(sport, {"key_metrics": "general athletic form", "elite_benchmark": "general elite athlete form"})
+    """Produce a sport-specific AI biomechanics report from rep-level pose data."""
+    ctx = SPORT_CONTEXT.get(sport, {"key_metrics": "general athletic form", "elite_benchmark": "general elite athletic form", "rep_unit": "rep"})
+    rep_count = pose_summary.get("rep_count", 0)
+    no_reps = pose_summary.get("no_reps_detected", False) or rep_count == 0
+    overall = pose_summary.get("overall_score")
+    consistency = pose_summary.get("consistency")
+    has_rich_data = bool(pose_summary.get("reps"))
+
+    if no_reps and not has_rich_data:
+        # fallback for very short captures or detection failures
+        return {
+            "form_score": 60,
+            "summary": (
+                f"We couldn't reliably detect distinct {ctx['rep_unit']}s in this capture. "
+                "Try a slightly longer take with the athlete fully in frame, side-on, and well lit."
+            ),
+            "strengths": ["Capture pipeline ran end-to-end."],
+            "improvements": [
+                {
+                    "area": "Capture quality",
+                    "issue": f"No clear {ctx['rep_unit']} reps detected.",
+                    "fix": f"Frame the athlete head-to-toe, ensure 3-5 clean {ctx['rep_unit']}s, and record from a side-angle.",
+                    "severity": "medium",
+                }
+            ],
+            "elite_comparison": "Insufficient data for benchmark comparison.",
+            "next_focus": f"Recapture with at least 3 clear {ctx['rep_unit']}s in frame.",
+            "rep_callouts": [],
+        }
+
     system = (
-        "You are an elite biomechanics coach and motion-capture analyst. "
-        "You evaluate athlete pose data and return STRICT JSON only — no markdown, no commentary."
+        "You are an elite biomechanics coach analysing motion-capture data. "
+        "You return STRICT JSON only — no markdown, no commentary outside the JSON object."
     )
-    prompt = f"""Analyze this {sport} performance using the captured pose statistics.
+    prompt = f"""Analyse this {sport} performance using the per-rep kinematic data.
 
 KEY METRICS FOR {sport.upper()}: {ctx['key_metrics']}
 ELITE BENCHMARK: {ctx['elite_benchmark']}
 
-POSE DATA SUMMARY (from MediaPipe / motion capture):
-{json.dumps(pose_summary, indent=2)}
+SESSION DATA (each rep is one {ctx['rep_unit']}; angles are degrees, all measurements at the rep apex):
+{json.dumps(_compact_for_prompt(pose_summary), indent=2)}
 
-Return ONLY this JSON shape (no extra text):
+Notes for your analysis:
+- The local rep score (0-100) measures how each rep matched target biomechanical bands.
+- Overall_score is the mean of rep scores. Consistency is 100 - 1.5×stddev of rep scores.
+- Comment on the WORST rep specifically — what failed mechanically, what to drill.
+- If rep_count is low (<3), note that more reps are needed for a confident assessment.
+
+Return ONLY this JSON:
 {{
-  "form_score": <integer 0-100>,
-  "summary": "<2-3 sentence overall assessment>",
+  "form_score": <integer 0-100, anchored to overall_score but you may adjust ±5 based on data quality and consistency>,
+  "summary": "<2-3 sentence overall assessment that references rep count and consistency>",
   "strengths": ["<strength 1>", "<strength 2>", "<strength 3>"],
   "improvements": [
-    {{"area": "<biomechanical area>", "issue": "<what's off>", "fix": "<concrete coaching cue>", "severity": "low|medium|high"}}
+    {{"area": "<biomechanical area>", "issue": "<measurable issue, cite numbers>", "fix": "<concrete coaching cue>", "severity": "low|medium|high"}}
   ],
-  "elite_comparison": "<how this compares to the benchmark in 1-2 sentences>",
-  "next_focus": "<single most important thing to drill next session>"
+  "elite_comparison": "<how this athlete compares to the benchmark in 1-2 sentences, cite numbers>",
+  "next_focus": "<single most important thing to drill next session>",
+  "rep_callouts": [
+    {{"rep_index": <int>, "label": "best|worst|notable", "comment": "<one-liner why>"}}
+  ]
 }}"""
     chat = _new_chat(system)
     response = await chat.send_message(UserMessage(text=prompt))
     try:
-        return _parse_json(response)
+        result = _parse_json(response)
     except Exception as e:
         logger.exception("Failed to parse AI form analysis: %s", e)
-        return {
-            "form_score": 70,
+        result = {
+            "form_score": overall if isinstance(overall, int) else 70,
             "summary": "Analysis pending detailed review.",
             "strengths": ["Consistent posture detected"],
             "improvements": [],
             "elite_comparison": "Comparable to developing athlete level.",
             "next_focus": "Continue capturing more sessions for richer analysis.",
+            "rep_callouts": [],
             "_raw": response,
         }
+    # Always include the deterministic rep stats so the UI doesn't depend on the LLM
+    result.setdefault("rep_count", rep_count)
+    result.setdefault("consistency", consistency)
+    result["overall_score"] = overall
+    return result
 
 
 async def generate_training_plan(sport: str, analysis: dict, athlete_level: str = "intermediate") -> dict:
