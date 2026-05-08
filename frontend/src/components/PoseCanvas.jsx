@@ -53,9 +53,13 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
   const [status, setStatus] = useState("idle"); // idle | loading | ready | running | error
   const [error, setError] = useState(null);
   const [duration, setDuration] = useState(0);
-  const [facing, setFacing] = useState("user"); // "user" (front) | "environment" (back)
-  const [hasMultipleCameras, setHasMultipleCameras] = useState(false);
+  const [cameras, setCameras] = useState([]); // [{deviceId, label}]
+  const [cameraIndex, setCameraIndex] = useState(0);
   const [switching, setSwitching] = useState(false);
+
+  const currentCam = cameras[cameraIndex];
+  // Heuristic: front-facing if label looks like front/user/face, OR if no label yet (default user-facing)
+  const isFrontCam = !currentCam || /front|user|face|selfie/i.test(currentCam.label || "");
 
   function angle(a, b, c) {
     const ab = { x: a.x - b.x, y: a.y - b.y };
@@ -148,29 +152,69 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
 
         const video = videoRef.current;
         if (mode === "live") {
-          // detect available cameras (only after permission grant works reliably,
-          // but enumerateDevices returns labels only after that)
-          try {
-            const devices = await navigator.mediaDevices.enumerateDevices();
-            const cams = devices.filter((d) => d.kind === "videoinput");
-            setHasMultipleCameras(cams.length > 1);
-          } catch {
-            /* ignore */
+          // Stop any previous stream first so the OS releases the camera.
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach((t) => t.stop());
+            streamRef.current = null;
           }
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: { width: 1280, height: 720, facingMode: facing },
-            audio: false,
-          });
+
+          // Build constraints: prefer specific deviceId once we have it, else
+          // fall back to facingMode for the first request (which also prompts
+          // for permission so labels become available).
+          const targetDeviceId = cameras[cameraIndex]?.deviceId;
+          const constraints = targetDeviceId
+            ? {
+                video: {
+                  deviceId: { exact: targetDeviceId },
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                },
+                audio: false,
+              }
+            : {
+                video: {
+                  facingMode: "user",
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                },
+                audio: false,
+              };
+
+          const stream = await navigator.mediaDevices.getUserMedia(constraints);
+          if (cancelled) {
+            stream.getTracks().forEach((t) => t.stop());
+            return;
+          }
           streamRef.current = stream;
           video.srcObject = stream;
           await video.play();
-          // re-check camera count post-permission so labels populate
+
+          // After permission is granted, enumerate cameras (labels are now populated).
           try {
             const devices = await navigator.mediaDevices.enumerateDevices();
-            const cams = devices.filter((d) => d.kind === "videoinput");
-            setHasMultipleCameras(cams.length > 1);
+            const cams = devices
+              .filter((d) => d.kind === "videoinput")
+              .map((d) => ({ deviceId: d.deviceId, label: d.label }));
+            // Only update if list actually differs to avoid loops.
+            setCameras((prev) => {
+              if (
+                prev.length === cams.length &&
+                prev.every((c, i) => c.deviceId === cams[i].deviceId)
+              ) {
+                return prev;
+              }
+              return cams;
+            });
+            // Sync cameraIndex to whichever device the active track is using.
+            const activeId = stream.getVideoTracks()[0]?.getSettings()?.deviceId;
+            if (activeId) {
+              const idx = cams.findIndex((c) => c.deviceId === activeId);
+              if (idx >= 0) {
+                setCameraIndex((cur) => (cur === idx ? cur : idx));
+              }
+            }
           } catch {
-            /* ignore */
+            /* enumerate not supported */
           }
         } else if (mode === "upload" && videoSrc) {
           video.src = videoSrc;
@@ -224,7 +268,7 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, videoSrc]);
+  }, [mode, videoSrc, cameraIndex]);
 
   useEffect(() => {
     if (!running) return;
@@ -320,8 +364,7 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
           data-testid="pose-video"
           className="absolute inset-0 w-full h-full object-cover"
           style={{
-            transform:
-              mode === "live" && facing === "user" ? "scaleX(-1)" : "none",
+            transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
           }}
           playsInline
           muted
@@ -332,8 +375,7 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
           data-testid="pose-canvas"
           className="absolute inset-0 w-full h-full"
           style={{
-            transform:
-              mode === "live" && facing === "user" ? "scaleX(-1)" : "none",
+            transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
           }}
         />
         {/* tactical grid */}
@@ -359,29 +401,30 @@ export default function PoseCanvas({ onStop, mode = "live", videoSrc = null, onR
         </div>
 
         {/* camera switch (live only) */}
-        {mode === "live" && !error && (
+        {mode === "live" && !error && cameras.length > 1 && (
           <button
             type="button"
             data-testid="camera-switch-btn"
             onClick={() => {
               if (running || switching) return;
               setSwitching(true);
-              setFacing((f) => (f === "user" ? "environment" : "user"));
-              setTimeout(() => setSwitching(false), 600);
+              setCameraIndex((i) => (i + 1) % cameras.length);
+              setTimeout(() => setSwitching(false), 800);
             }}
             disabled={running || switching}
             className="absolute top-3 right-3 inline-flex items-center gap-2 bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 px-3 py-1.5 transition-colors"
             title={
               running
                 ? "Stop recording before switching cameras"
-                : facing === "user"
-                  ? "Switch to back camera"
-                  : "Switch to front camera"
+                : `Switch camera (${cameras.length} available)`
             }
           >
             <SwitchCamera className="w-4 h-4" />
-            <span className="text-[11px] font-display uppercase tracking-widest font-bold">
-              {facing === "user" ? "Front" : "Back"}
+            <span className="text-[11px] font-display uppercase tracking-widest font-bold max-w-[120px] truncate">
+              {isFrontCam ? "Front" : "Back"}
+              <span className="ml-1 text-zinc-400">
+                {cameraIndex + 1}/{cameras.length}
+              </span>
             </span>
           </button>
         )}
