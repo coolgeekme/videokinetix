@@ -359,19 +359,19 @@ export default function PoseCanvas({
           if (cancelled) return;
           const v = videoRef.current;
           const lm = landmarkerRef.current;
-          if (
-            v &&
-            lm &&
-            v.readyState >= 2 &&
-            !v.paused &&
-            !v.ended &&
-            v.videoWidth > 0
-          ) {
+          // In LIVE mode the camera always streams (so we require !paused).
+          // In UPLOAD mode we run detection even when paused so the user can
+          // see skeletons on the current frame and tap the target before pressing Start.
+          const ready =
+            v && lm && v.readyState >= 2 && v.videoWidth > 0;
+          const shouldDetect =
+            ready &&
+            (mode === "live" ? !v.paused && !v.ended : true);
+          if (shouldDetect) {
             try {
               const result = lm.detectForVideo(v, performance.now());
               drawResults(result);
             } catch (err) {
-              // detect can throw before metadata; ignore individual errors
               if (process.env.NODE_ENV !== "production")
                 console.debug("detect error", err);
             }
