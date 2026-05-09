@@ -35,14 +35,14 @@ async function loadPoseLandmarker() {
     const landmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: {
         modelAssetPath:
-          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
         delegate: "GPU",
       },
       runningMode: "VIDEO",
       numPoses: 5,
-      minPoseDetectionConfidence: 0.5,
-      minPosePresenceConfidence: 0.5,
-      minTrackingConfidence: 0.5,
+      minPoseDetectionConfidence: 0.3,
+      minPosePresenceConfidence: 0.3,
+      minTrackingConfidence: 0.3,
     });
     return landmarker;
   })();
@@ -67,6 +67,8 @@ export default function PoseCanvas({
   videoSrc = null,
   sport = "basketball",
   onReady,
+  trimStart = 0,
+  trimEnd = null,
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -472,7 +474,7 @@ export default function PoseCanvas({
     const v = videoRef.current;
     if (v && mode === "upload") {
       try {
-        v.currentTime = 0;
+        v.currentTime = Math.max(0, trimStart || 0);
       } catch {
         /* ignore */
       }
@@ -483,6 +485,23 @@ export default function PoseCanvas({
             "Browser blocked auto-play. Tap the video, then press Start again."
           );
         });
+      }
+      // Auto-stop when reaching the trim end
+      const end = trimEnd && trimEnd > (trimStart || 0) ? trimEnd : null;
+      if (end != null) {
+        const onTime = () => {
+          if (!videoRef.current) return;
+          if (videoRef.current.currentTime >= end) {
+            videoRef.current.removeEventListener("timeupdate", onTime);
+            videoRef.current.pause();
+            setRunning((r) => {
+              if (!r) return r;
+              setTimeout(() => stop(), 0);
+              return r;
+            });
+          }
+        };
+        v.addEventListener("timeupdate", onTime);
       }
       v.onended = () => {
         if (videoRef.current && !videoRef.current.paused) videoRef.current.pause();

@@ -235,8 +235,19 @@ export default function Capture() {
                 mode={mode}
                 videoSrc={videoSrc}
                 sport={sport}
+                trimStart={trim[0]}
+                trimEnd={trim[1] || null}
                 onStop={handleStop}
               />
+
+              {mode === "upload" && videoDuration > 0 && (
+                <TrimSlider
+                  duration={videoDuration}
+                  value={trim}
+                  onChange={setTrim}
+                  onScrubTo={scrubVideoTo}
+                />
+              )}
 
               {analyzing && (
                 <div
@@ -245,6 +256,22 @@ export default function Capture() {
                 >
                   <div className="text-center">
                     <Loader2 className="w-10 h-10 text-[#ff3b30] animate-spin mx-auto" />
+                    <p className="mt-4 font-display uppercase tracking-widest font-bold text-zinc-300">
+                      AI analyzing biomechanics…
+                    </p>
+                    <p className="mt-1 text-xs text-zinc-500 font-mono">
+                      gpt-5.2 · elite benchmark comparison
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
                     <p className="mt-4 font-display uppercase tracking-widest font-bold text-zinc-300">
                       AI analyzing biomechanics…
                     </p>
