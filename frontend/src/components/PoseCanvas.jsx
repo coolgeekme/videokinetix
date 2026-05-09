@@ -64,11 +64,14 @@ async function loadBallDetector() {
       baseOptions: {
         modelAssetPath:
           "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
-        // CPU is more reliable than GPU on iOS Safari (limited WebGL access).
-        // The model is small enough that CPU is fast enough at 15fps.
-        delegate: "CPU",
+        // GPU is required for the float16 model variant. iOS Safari supports
+        // WebGL2 — same delegate that the pose landmarker uses successfully.
+        delegate: "GPU",
       },
-      scoreThreshold: 0.25,
+      // More permissive threshold — basketballs in real-world video are often
+      // small/blurry; 0.15 catches more true positives, false positives are
+      // filtered downstream by the hoop-ROI shot detector.
+      scoreThreshold: 0.15,
       runningMode: "VIDEO",
       categoryAllowlist: ["sports ball"],
       maxResults: 3,
@@ -127,7 +130,10 @@ export default function PoseCanvas({
   const lastBallRef = useRef(null); // most recent detected ball {x, y, conf} (live preview)
   const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
   const ballDetectFrameSkipRef = useRef(0);
+  const lastBallSeenAtRef = useRef(0);
   const hoopRoiRef = useRef(null); // mirror of hoopRoi state for rAF reads
+  const [ballDetectorState, setBallDetectorState] = useState("idle"); // 'idle' | 'loading' | 'ready' | 'failed'
+  const [ballSeen, setBallSeen] = useState(false);
   const [hoopRoi, setHoopRoi] = useState(null); // {x, y, w, h} normalized
   const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'ready'
   const [liveMakes, setLiveMakes] = useState(0);
@@ -498,11 +504,16 @@ export default function PoseCanvas({
         landmarkerRef.current = landmarker;
         // Load ball detector lazily for basketball only — fail soft if it errors
         if (sport === "basketball") {
+          setBallDetectorState("loading");
           try {
             const det = await loadBallDetector();
-            if (!cancelled) ballDetectorRef.current = det;
+            if (!cancelled) {
+              ballDetectorRef.current = det;
+              setBallDetectorState("ready");
+            }
           } catch (e) {
             console.warn("[PoseCanvas] ball detector failed to load — make/miss tracking disabled", e);
+            if (!cancelled) setBallDetectorState("failed");
           }
         }
 
@@ -665,11 +676,12 @@ export default function PoseCanvas({
               }
               drawResults(result);
 
-              // Basketball: run object detection on every other frame for perf
+              // Basketball: run object detection every frame for responsive
+              // ball tracking (shots happen fast — every-other-frame missed
+              // mid-flight balls). EfficientDet-Lite0 on GPU is ~5ms.
               const ballDet = ballDetectorRef.current;
               if (sport === "basketball" && ballDet) {
-                ballDetectFrameSkipRef.current = (ballDetectFrameSkipRef.current + 1) % 2;
-                if (ballDetectFrameSkipRef.current === 0) {
+                {
                   try {
                     const detRes = ballDet.detectForVideo(v, performance.now());
                     const dets = detRes?.detections || [];
@@ -693,6 +705,14 @@ export default function PoseCanvas({
                     if (ball) {
                       ballTrailRef.current.push({ ...ball, t: performance.now() / 1000 });
                       if (ballTrailRef.current.length > 30) ballTrailRef.current.shift();
+                      lastBallSeenAtRef.current = performance.now();
+                      if (!ballSeen) setBallSeen(true);
+                    } else if (
+                      ballSeen &&
+                      performance.now() - lastBallSeenAtRef.current > 1500
+                    ) {
+                      // Hide the "ball detected" indicator after 1.5s without a hit
+                      setBallSeen(false);
                     }
                     // Record ball during capture
                     if (runningRef.current && startedAtRef.current != null) {
@@ -1190,6 +1210,55 @@ export default function PoseCanvas({
             </span>
             <span className="text-[10px] font-mono text-zinc-400">
               {liveAttempts ? `${Math.round((liveMakes / liveAttempts) * 100)}%` : "—"}
+            </span>
+          </div>
+        )}
+
+        {/* Ball-detector status pill (basketball, top-right under counter).
+            Tells the user *why* shots aren't being counted when ball detection
+            isn't picking up the basketball. */}
+        {sport === "basketball" && (
+          <div
+            data-testid="ball-detector-status"
+            className={`absolute right-3 flex items-center gap-1.5 backdrop-blur border px-2.5 py-1 pointer-events-none transition-colors ${
+              running && hoopRoi ? "top-12" : "top-12"
+            } ${
+              ballDetectorState === "failed"
+                ? "bg-[#ff3b30]/15 border-[#ff3b30]/50"
+                : ballSeen
+                  ? "bg-[#ff8c00]/15 border-[#ff8c00]/60"
+                  : ballDetectorState === "ready"
+                    ? "bg-black/70 border-white/15"
+                    : "bg-black/70 border-white/10"
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                ballDetectorState === "failed"
+                  ? "bg-[#ff3b30]"
+                  : ballSeen
+                    ? "bg-[#ff8c00] pulse-dot"
+                    : ballDetectorState === "ready"
+                      ? "bg-zinc-400"
+                      : "bg-zinc-600"
+              }`}
+            />
+            <span
+              className={`text-[10px] font-display uppercase tracking-widest font-bold ${
+                ballDetectorState === "failed"
+                  ? "text-[#ff3b30]"
+                  : ballSeen
+                    ? "text-[#ff8c00]"
+                    : "text-zinc-300"
+              }`}
+            >
+              {ballDetectorState === "failed"
+                ? "Ball model failed"
+                : ballDetectorState === "loading"
+                  ? "Loading ball model"
+                  : ballSeen
+                    ? "Ball tracked"
+                    : "Ball: searching"}
             </span>
           </div>
         )}
