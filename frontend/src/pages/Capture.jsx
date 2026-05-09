@@ -272,19 +272,3 @@ export default function Capture() {
     </div>
   );
 }
-                    <p className="mt-4 font-display uppercase tracking-widest font-bold text-zinc-300">
-                      AI analyzing biomechanics…
-                    </p>
-                    <p className="mt-1 text-xs text-zinc-500 font-mono">
-                      gpt-5.2 · elite benchmark comparison
-                    </p>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
