@@ -17,16 +17,15 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
 ## Implemented (Feb 2026 – v1.1)
-- **Recording-tracking fix (Feb 2026)**: Skeleton was freezing on the first frame after Start because (1) video seeked back to trim-start (often 0), invalidating the locked anchor, and (2) the strict 0.18 anchor-distance threshold rejected the now-far-away pose, forcing tracking-lost. Fixes:
+- **Tile-detection removal (Feb 2026)**: Tile detection was passing 3 detectForVideo calls per rAF tick with sub-millisecond timestamps (`ts`, `ts+0.1`, `ts+0.2`). MediaPipe Tasks rejects sub-ms timestamps as duplicates, silently returning empty results. Detection broke entirely. **Removed tile detection** — now selection AND recording in upload mode use a single full-frame `detectForVideo(v, performance.now())`. Reliable single code path. Tile/deep-scan can be re-added later as an explicit toggle for the rare 2-distant-athlete case.
+- **Recording-tracking fix (Feb 2026)**: Skeleton was freezing on Start because (1) video seeked back to trim-start (often 0), invalidating the locked anchor, and (2) the strict 0.18 anchor-distance threshold rejected the now-far-away pose. Fixes:
   - Only seek backward if `currentTime < trimStart` — preserves user's scrubbed position.
-  - Refresh `lastSeenAtRef` to "now" right before play so grace period starts fresh.
-  - Relaxed anchor threshold to **3x** during recording (`runningRef.current`) and always adopt the single detected pose when only one person is in frame.
-  - Replaced smart-ROI / tile detection during recording with **plain full-frame detection** — simpler, more reliable, fast enough for 1-athlete tracking.
-  - Detect-error logging upgraded from silent `console.debug` to loud `console.warn("[PoseCanvas] detect error", err)` so iOS Safari issues surface in remote console viewers.
-- **iOS Safari video render fix (Feb 2026)**: Init now does play→seek→pause to warm up the iOS video decoder + skip past opening black frames.
-- **Custom play/pause overlay (Feb 2026)**: Bottom-left Play/Pause pill (`data-testid="video-play-pause-btn"`) since native `<video controls>` are blocked by the canvas overlay.
+  - Refresh `lastSeenAtRef` to "now" right before play.
+  - Relax anchor threshold to **3x** during recording; always adopt the single detected pose when only one person is in frame.
+- **iOS Safari video render fix (Feb 2026)**: Init does play→seek→pause to warm up the iOS video decoder + skip past opening black frames.
+- **Custom play/pause overlay (Feb 2026)**: Bottom-left Play/Pause pill since native `<video controls>` are blocked by the canvas overlay.
 - **Reset target on video change (Feb 2026)**: `targetAnchorRef` and tracking state reset whenever `videoSrc`/`mode` changes.
-- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` that was silently swallowed — selection phase now properly runs full-frame + left + right tile detection so distant/small athletes appear.
+- **Loud detect-error logging (Feb 2026)**: `console.warn("[PoseCanvas] detect error", err)` so iOS Safari issues surface in remote consoles.
 
 ## Implemented (Feb 2026 – v1.0)
 - Auth: register / login / me  (`/api/auth/*`)

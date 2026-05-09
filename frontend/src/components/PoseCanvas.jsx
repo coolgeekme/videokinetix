@@ -481,46 +481,13 @@ export default function PoseCanvas({
                 // tracking during playback; nearest-neighbour pose matching in
                 // drawResults() keeps the locked target identified.
                 result = lm.detectForVideo(v, performance.now());
-              } else if (mode === "upload") {
-                // Selection phase (no target locked): full-frame + left/right
-                // half-tile detection with hip-center dedupe. Surfaces small or
-                // distant athletes that full-frame alone would miss so the user
-                // can tap-to-pick them.
-                if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
-                const tw = 640;
-                const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
-                const cc = cropCanvasRef.current;
-                cc.width = tw;
-                cc.height = th;
-                const cctx = cc.getContext("2d");
-                const ts = performance.now();
-                const fullR = lm.detectForVideo(v, ts);
-                cctx.drawImage(v, 0, 0, v.videoWidth * 0.6, v.videoHeight, 0, 0, tw, th);
-                const leftR = lm.detectForVideo(cc, ts + 0.1);
-                cctx.drawImage(v, v.videoWidth * 0.4, 0, v.videoWidth * 0.6, v.videoHeight, 0, 0, tw, th);
-                const rightR = lm.detectForVideo(cc, ts + 0.2);
-                const fullPoses = fullR?.landmarks || [];
-                const leftPoses = (leftR?.landmarks || []).map((pose) =>
-                  pose.map((p) => ({ ...p, x: p.x * 0.6, y: p.y }))
-                );
-                const rightPoses = (rightR?.landmarks || []).map((pose) =>
-                  pose.map((p) => ({ ...p, x: 0.4 + p.x * 0.6, y: p.y }))
-                );
-                const all = [...fullPoses, ...leftPoses, ...rightPoses];
-                const dedup = [];
-                for (const p of all) {
-                  const c = hipCenter(p);
-                  if (!c) continue;
-                  const visSum = p.reduce((s, pt) => s + (pt.visibility || 0), 0);
-                  const dupIdx = dedup.findIndex((q) => {
-                    const qc = hipCenter(q.pose);
-                    return qc && dist2D(c, qc) < 0.07;
-                  });
-                  if (dupIdx === -1) dedup.push({ pose: p, vis: visSum });
-                  else if (visSum > dedup[dupIdx].vis) dedup[dupIdx] = { pose: p, vis: visSum };
-                }
-                result = { landmarks: dedup.map((d) => d.pose) };
               } else {
+                // Selection (live or upload, no zoom): single full-frame detection.
+                // Tile detection (used to surface tiny far athletes in 2-athlete
+                // gym shots) was triggering MediaPipe sub-ms timestamp rejections
+                // and silently failing — single full-frame is reliable for the
+                // typical 1-athlete case. Multi-athlete deep-scan can be re-added
+                // as an optional toggle later.
                 result = lm.detectForVideo(v, performance.now());
               }
               drawResults(result);
