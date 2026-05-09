@@ -16,6 +16,9 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Implemented (Feb 2026 – v1.1)
+- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` in `PoseCanvas.jsx` that was silently swallowed by try/catch — meaning tile-detection NEVER ran. Now full-frame + left-half + right-half detection with hip-center dedupe runs throughout selection AND recording for uploaded videos, so distant/small athletes get picked up via their higher-resolution tile view.
+
 ## Implemented (Feb 2026 – v1.0)
 - Auth: register / login / me  (`/api/auth/*`)
 - Sports catalog (`/api/sports`) — 4 sports

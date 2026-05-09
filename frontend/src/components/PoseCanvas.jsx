@@ -429,10 +429,13 @@ export default function PoseCanvas({
                     ),
                   };
                 }
-              } else if (mode === "upload" && !hasTargetRef.current && !runningRef.current) {
-                // Selection phase on uploaded video: run detection on full frame
-                // PLUS left and right half-tiles. Merge results so distant athletes
-                // (small in full frame) get a higher-resolution view in their tile.
+              } else if (mode === "upload") {
+                // Uploaded video: run detection on the full frame PLUS left/right
+                // half-tiles, then merge. Distant or small athletes get a higher-
+                // resolution view in their tile, dramatically boosting detection.
+                // Runs during selection AND recording so the locked target stays
+                // visible throughout playback (uploaded video performance is OK
+                // with 3x inferences per frame).
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
                 const tw = 640;
                 const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
