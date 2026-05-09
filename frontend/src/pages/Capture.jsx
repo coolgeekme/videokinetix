@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import SportPicker from "@/components/SportPicker";
 import PoseCanvas from "@/components/PoseCanvas";
+import TrimSlider from "@/components/TrimSlider";
 import { Upload, Camera, Loader2, ArrowRight, User } from "lucide-react";
 import { toast } from "sonner";
 
@@ -15,6 +16,8 @@ export default function Capture() {
   const [mode, setMode] = useState("live");
   const [videoSrc, setVideoSrc] = useState(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [trim, setTrim] = useState([0, 0]);
   const fileRef = useRef(null);
   const nav = useNavigate();
 
@@ -44,6 +47,28 @@ export default function Capture() {
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
     setMode("upload");
+    setVideoDuration(0);
+    setTrim([0, 0]);
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.src = url;
+    probe.onloadedmetadata = () => {
+      const d =
+        probe.duration && Number.isFinite(probe.duration) ? probe.duration : 0;
+      setVideoDuration(d);
+      setTrim([0, d]);
+    };
+  };
+
+  const scrubVideoTo = (t) => {
+    const v = document.querySelector('[data-testid="pose-video"]');
+    if (v && Number.isFinite(t)) {
+      try {
+        v.currentTime = t;
+      } catch {
+        /* ignore */
+      }
+    }
   };
 
   const handleStop = async (summary) => {
