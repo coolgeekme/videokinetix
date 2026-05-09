@@ -17,7 +17,8 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
 ## Implemented (Feb 2026 – v1.1)
-- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` in `PoseCanvas.jsx` that was silently swallowed by try/catch — meaning tile-detection NEVER ran. Now full-frame + left-half + right-half detection with hip-center dedupe runs throughout selection AND recording for uploaded videos, so distant/small athletes get picked up via their higher-resolution tile view.
+- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` in `PoseCanvas.jsx` that was silently swallowed by try/catch — meaning tile-detection NEVER ran. Tile detection now runs during selection so distant/small athletes get picked up via their higher-resolution tile view.
+- **Smart-ROI tracking during recording (Feb 2026)**: Once a target is locked, detection switches from 3x tile-detection to a **single** detection on a tile centered around the target's last hip position (50% wide × 70% tall, follows the athlete frame-to-frame). Single inference keeps up with playback motion + higher resolution view of the target. Falls back to full-frame if ROI misses.
 
 ## Implemented (Feb 2026 – v1.0)
 - Auth: register / login / me  (`/api/auth/*`)

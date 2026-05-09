@@ -429,13 +429,54 @@ export default function PoseCanvas({
                     ),
                   };
                 }
+              } else if (mode === "upload" && targetAnchorRef.current) {
+                // Smart ROI: target is locked → run a single detection on a tile
+                // centered around the target's last-known hip position. Single
+                // inference (fast → keeps up with playback) and higher-resolution
+                // view of the target athlete. ROI follows the athlete frame-to-
+                // frame via the updated anchor in drawResults().
+                if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
+                const roiW = 0.5;
+                const roiH = 0.7;
+                const ax = targetAnchorRef.current.x;
+                const ay = targetAnchorRef.current.y;
+                const x0 = Math.max(0, Math.min(1 - roiW, ax - roiW / 2));
+                const y0 = Math.max(0, Math.min(1 - roiH, ay - roiH / 2));
+                const tw = 640;
+                const th = Math.round((roiH / roiW) * tw * (v.videoHeight / v.videoWidth)) || 480;
+                const cc = cropCanvasRef.current;
+                cc.width = tw;
+                cc.height = th;
+                const cctx = cc.getContext("2d");
+                cctx.drawImage(
+                  v,
+                  x0 * v.videoWidth, y0 * v.videoHeight,
+                  roiW * v.videoWidth, roiH * v.videoHeight,
+                  0, 0, tw, th
+                );
+                const ts = performance.now();
+                const r = lm.detectForVideo(cc, ts);
+                if (r && r.landmarks && r.landmarks.length) {
+                  result = {
+                    ...r,
+                    landmarks: r.landmarks.map((pose) =>
+                      pose.map((p) => ({
+                        ...p,
+                        x: x0 + p.x * roiW,
+                        y: y0 + p.y * roiH,
+                      }))
+                    ),
+                  };
+                } else {
+                  // ROI miss → fall back to full-frame so we don't lose the
+                  // athlete entirely if they walked outside the ROI bounds.
+                  result = lm.detectForVideo(v, ts + 1);
+                }
               } else if (mode === "upload") {
-                // Uploaded video: run detection on the full frame PLUS left/right
-                // half-tiles, then merge. Distant or small athletes get a higher-
-                // resolution view in their tile, dramatically boosting detection.
-                // Runs during selection AND recording so the locked target stays
-                // visible throughout playback (uploaded video performance is OK
-                // with 3x inferences per frame).
+                // Selection phase (no target locked): full-frame + left/right
+                // half-tile detection with hip-center dedupe. Surfaces small or
+                // distant athletes that full-frame alone would miss so the user
+                // can tap-to-pick them.
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
                 const tw = 640;
                 const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
@@ -445,31 +486,9 @@ export default function PoseCanvas({
                 const cctx = cc.getContext("2d");
                 const ts = performance.now();
                 const fullR = lm.detectForVideo(v, ts);
-                // Left tile: x in [0, 0.6] of full
-                cctx.drawImage(
-                  v,
-                  0,
-                  0,
-                  v.videoWidth * 0.6,
-                  v.videoHeight,
-                  0,
-                  0,
-                  tw,
-                  th
-                );
+                cctx.drawImage(v, 0, 0, v.videoWidth * 0.6, v.videoHeight, 0, 0, tw, th);
                 const leftR = lm.detectForVideo(cc, ts + 0.1);
-                // Right tile: x in [0.4, 1.0]
-                cctx.drawImage(
-                  v,
-                  v.videoWidth * 0.4,
-                  0,
-                  v.videoWidth * 0.6,
-                  v.videoHeight,
-                  0,
-                  0,
-                  tw,
-                  th
-                );
+                cctx.drawImage(v, v.videoWidth * 0.4, 0, v.videoWidth * 0.6, v.videoHeight, 0, 0, tw, th);
                 const rightR = lm.detectForVideo(cc, ts + 0.2);
                 const fullPoses = fullR?.landmarks || [];
                 const leftPoses = (leftR?.landmarks || []).map((pose) =>
@@ -479,24 +498,17 @@ export default function PoseCanvas({
                   pose.map((p) => ({ ...p, x: 0.4 + p.x * 0.6, y: p.y }))
                 );
                 const all = [...fullPoses, ...leftPoses, ...rightPoses];
-                // Dedupe by hip-center proximity, keep the most-visible duplicate
                 const dedup = [];
                 for (const p of all) {
                   const c = hipCenter(p);
                   if (!c) continue;
-                  const visSum = p.reduce(
-                    (s, pt) => s + (pt.visibility || 0),
-                    0
-                  );
+                  const visSum = p.reduce((s, pt) => s + (pt.visibility || 0), 0);
                   const dupIdx = dedup.findIndex((q) => {
                     const qc = hipCenter(q.pose);
                     return qc && dist2D(c, qc) < 0.07;
                   });
-                  if (dupIdx === -1) {
-                    dedup.push({ pose: p, vis: visSum });
-                  } else if (visSum > dedup[dupIdx].vis) {
-                    dedup[dupIdx] = { pose: p, vis: visSum };
-                  }
+                  if (dupIdx === -1) dedup.push({ pose: p, vis: visSum });
+                  else if (visSum > dedup[dupIdx].vis) dedup[dupIdx] = { pose: p, vis: visSum };
                 }
                 result = { landmarks: dedup.map((d) => d.pose) };
               } else {
