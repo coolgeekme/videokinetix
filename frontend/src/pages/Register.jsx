@@ -31,9 +31,11 @@ export default function Register() {
       <div className="w-full max-w-md">
         <Link to="/" className="flex items-center gap-2 mb-10" data-testid="register-brand">
           <div className="w-8 h-8 bg-[#ff3b30] flex items-center justify-center">
-            <span className="font-display font-black">K</span>
+            <span className="font-display font-black text-sm">VK</span>
           </div>
-          <span className="font-display font-black uppercase tracking-tight text-xl">Kinetic</span>
+          <span className="font-display font-black uppercase tracking-tight text-xl">
+            VisionKinetix<span className="text-[#ff3b30]">.ai</span>
+          </span>
         </Link>
 
         <div className="text-[11px] uppercase tracking-widest text-[#00ff88] font-display font-bold mb-2">

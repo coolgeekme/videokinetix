@@ -1,4 +1,4 @@
-# KINETIC – AI Motion Capture Athlete Training Platform – PRD
+# VisionKinetix.ai – AI Motion Capture Athlete Training Platform – PRD
 
 ## Original Problem Statement
 AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style markerless motion capture and AI analysis to deliver personalized training programs across basketball, soccer, swimming, and pickleball.

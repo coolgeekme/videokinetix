@@ -1,1 +1,1 @@
-"""KINETIC backend tests package."""
+"""VisionKinetix.ai backend tests package."""

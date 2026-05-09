@@ -28,10 +28,10 @@ export default function AppShell() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link to="/app/dashboard" className="flex items-center gap-2" data-testid="brand-logo">
             <div className="w-8 h-8 bg-[#ff3b30] flex items-center justify-center">
-              <span className="font-display font-black text-white text-lg">K</span>
+              <span className="font-display font-black text-white text-sm">VK</span>
             </div>
             <span className="font-display font-black text-xl tracking-tight uppercase">
-              Kinetic
+              VisionKinetix<span className="text-[#ff3b30]">.ai</span>
             </span>
           </Link>
 

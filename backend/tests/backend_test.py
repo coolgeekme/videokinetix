@@ -1,4 +1,4 @@
-"""KINETIC backend API tests.
+"""VisionKinetix.ai backend API tests.
 
 Covers: auth, sports, sessions (with live GPT-5.2 form analysis),
 training plans, dashboard stats, goals, and cross-user isolation.
@@ -109,7 +109,7 @@ class TestHealth:
         assert r.status_code == 200
         body = r.json()
         assert body.get("status") == "ok"
-        assert body.get("service") == "KINETIC API"
+        assert body.get("service") == "VisionKinetix.ai API"
 
 
 # ---------- Auth ----------

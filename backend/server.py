@@ -1,4 +1,4 @@
-"""KINETIC – AI Motion Capture Athlete Training Platform – FastAPI backend."""
+"""VisionKinetix.ai – AI Motion Capture Athlete Training Platform – FastAPI backend."""
 import logging
 import os
 import uuid
@@ -30,7 +30,7 @@ client = AsyncIOMotorClient(mongo_url)
 db = client[os.environ["DB_NAME"]]
 
 # ---------- App ----------
-app = FastAPI(title="KINETIC API")
+app = FastAPI(title="VisionKinetix.ai API")
 api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -646,7 +646,7 @@ async def delete_goal(goal_id: str, user_id: str = Depends(get_current_user_id))
 # ---------- Health ----------
 @api.get("/")
 async def root():
-    return {"service": "KINETIC API", "status": "ok"}
+    return {"service": "VisionKinetix.ai API", "status": "ok"}
 
 
 # ---------- Mount + CORS ----------

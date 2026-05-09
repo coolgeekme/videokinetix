@@ -18,10 +18,10 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
           <Link to="/" className="flex items-center gap-2" data-testid="landing-logo">
             <div className="w-8 h-8 bg-[#ff3b30] flex items-center justify-center">
-              <span className="font-display font-black text-lg">K</span>
+              <span className="font-display font-black text-sm">VK</span>
             </div>
             <span className="font-display font-black text-xl uppercase tracking-tight">
-              Kinetic
+              VisionKinetix<span className="text-[#ff3b30]">.ai</span>
             </span>
           </Link>
           <nav className="hidden md:flex items-center gap-8 text-sm">
@@ -67,7 +67,7 @@ export default function Landing() {
               <span className="text-[#ff3b30]">data</span> never lies.
             </h1>
             <p className="mt-8 max-w-xl text-zinc-300 text-base sm:text-lg leading-relaxed">
-              KINETIC turns your webcam into a motion-capture lab. Get real-time
+              VisionKinetix.ai turns your webcam into a motion-capture lab. Get real-time
               biomechanics, AI form analysis, and 7-day training plans engineered
               for your sport — no markers, no studio.
             </p>
@@ -266,12 +266,14 @@ export default function Landing() {
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div className="flex items-center gap-2">
             <div className="w-7 h-7 bg-[#ff3b30] flex items-center justify-center">
-              <span className="font-display font-black text-sm">K</span>
+              <span className="font-display font-black text-xs">VK</span>
             </div>
-            <span className="font-display font-black uppercase tracking-tight">Kinetic</span>
+            <span className="font-display font-black uppercase tracking-tight">
+              VisionKinetix<span className="text-[#ff3b30]">.ai</span>
+            </span>
           </div>
           <p className="text-xs text-zinc-500 font-mono">
-            © 2026 Kinetic Labs · Markerless motion capture for athletes
+            © 2026 VisionKinetix.ai · Markerless motion capture for athletes
           </p>
         </div>
       </footer>
