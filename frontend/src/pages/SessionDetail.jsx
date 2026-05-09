@@ -17,11 +17,14 @@ export default function SessionDetail() {
   const [session, setSession] = useState(null);
   const [athlete, setAthlete] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
   const [generating, setGenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deletingPlan, setDeletingPlan] = useState(false);
 
   useEffect(() => {
+    setLoading(true);
+    setLoadError(null);
     api
       .get(`/sessions/${id}`)
       .then(async (r) => {
@@ -34,6 +37,9 @@ export default function SessionDetail() {
             /* athlete may have been deleted */
           }
         }
+      })
+      .catch((err) => {
+        setLoadError(errMsg(err, "Failed to load session"));
       })
       .finally(() => setLoading(false));
   }, [id]);
@@ -80,9 +86,40 @@ export default function SessionDetail() {
   };
 
   if (loading)
-    return <p className="text-sm text-zinc-500">Loading…</p>;
-  if (!session)
-    return <p className="text-sm text-zinc-500">Session not found.</p>;
+    return (
+      <div className="flex items-center justify-center py-16" data-testid="session-loading">
+        <Loader2 className="w-6 h-6 text-[#ff3b30] animate-spin mr-3" />
+        <span className="text-sm text-zinc-400 font-display uppercase tracking-widest">Loading session…</span>
+      </div>
+    );
+  if (loadError || !session)
+    return (
+      <div className="space-y-4 py-8" data-testid="session-error">
+        <div className="border border-[#ff3b30]/40 bg-[#ff3b30]/5 p-6">
+          <div className="text-[10px] uppercase tracking-widest text-[#ff3b30] font-display font-bold">
+            Couldn't load session
+          </div>
+          <p className="mt-2 text-sm text-zinc-300">
+            {loadError || "Session not found. It may have been deleted, or the network connection dropped while loading."}
+          </p>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              data-testid="session-retry-btn"
+              onClick={() => window.location.reload()}
+              className="bg-[#ff3b30] hover:bg-[#ff5c53] text-white font-display uppercase tracking-wide text-xs px-4 py-2 transition-colors"
+            >
+              Retry
+            </button>
+            <Link
+              to="/app/sessions"
+              className="border border-white/10 hover:border-white/30 text-zinc-300 font-display uppercase tracking-wide text-xs px-4 py-2 transition-colors"
+            >
+              All sessions
+            </Link>
+          </div>
+        </div>
+      </div>
+    );
 
   const a = session.analysis || {};
   const score = session.form_score;

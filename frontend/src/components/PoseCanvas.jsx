@@ -428,7 +428,7 @@ export default function PoseCanvas({
         if (mode === "live" && Date.now() - lastThumbAtRef.current > 200) {
           lastThumbAtRef.current = Date.now();
           try {
-            const tw = 640;
+            const tw = 480;
             const th = Math.round((h / w) * tw);
             const off = document.createElement("canvas");
             off.width = tw;
@@ -443,7 +443,7 @@ export default function PoseCanvas({
             octx.drawImage(canvas, 0, 0, tw, th);
             thumbsRef.current.push({
               t,
-              dataUrl: off.toDataURL("image/jpeg", 0.7),
+              dataUrl: off.toDataURL("image/jpeg", 0.55),
             });
             if (thumbsRef.current.length > 1500) thumbsRef.current.shift();
           } catch {
@@ -1001,15 +1001,17 @@ export default function PoseCanvas({
           v.currentTime = Math.min(timeS, v.duration - 0.05);
           setTimeout(resolve, 800);
         });
-        const tw = 640;
-        const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
+        // Smaller + lower-quality thumbnail keeps the upload payload tiny
+        // (mobile networks 502 on large multipart-ish bodies).
+        const tw = 480;
+        const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 270;
         const off = document.createElement("canvas");
         off.width = tw;
         off.height = th;
         const octx = off.getContext("2d");
         octx.drawImage(v, 0, 0, tw, th);
         octx.drawImage(c, 0, 0, tw, th);
-        return off.toDataURL("image/jpeg", 0.7);
+        return off.toDataURL("image/jpeg", 0.55);
       } catch {
         return null;
       }
