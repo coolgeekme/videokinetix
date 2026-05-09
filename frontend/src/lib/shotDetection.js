@@ -157,7 +157,18 @@ export function detectShots(ballFrames, hoopRoi) {
       apex_y: +apex.y.toFixed(4),
       hoop_x: +hoopCenterX.toFixed(4),
       made,
-      ball_path: ball_path.map((p) => ({ t: +p.t.toFixed(2), x: +p.x.toFixed(4), y: +p.y.toFixed(4) })),
+      // Down-sample ball_path to at most 6 evenly-spaced points so the payload
+      // stays tiny — visualization isn't replayed, this is only for analytics.
+      ball_path: (() => {
+        const path = ball_path.map((p) => ({
+          t: +p.t.toFixed(2),
+          x: +p.x.toFixed(4),
+          y: +p.y.toFixed(4),
+        }));
+        if (path.length <= 6) return path;
+        const step = (path.length - 1) / 5;
+        return [0, 1, 2, 3, 4, 5].map((i) => path[Math.round(i * step)]);
+      })(),
     });
     lastShotEndT = outcomeT;
     i = k + 1;

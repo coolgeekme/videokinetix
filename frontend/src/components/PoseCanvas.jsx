@@ -64,7 +64,9 @@ async function loadBallDetector() {
       baseOptions: {
         modelAssetPath:
           "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
-        delegate: "GPU",
+        // CPU is more reliable than GPU on iOS Safari (limited WebGL access).
+        // The model is small enough that CPU is fast enough at 15fps.
+        delegate: "CPU",
       },
       scoreThreshold: 0.25,
       runningMode: "VIDEO",
