@@ -168,8 +168,15 @@ export default function PoseCanvas({
               targetIdx = i;
             }
           });
-          if (bestDist > TRACKING_DISTANCE_THRESHOLD) {
-            // too far — tracking lost
+          // Use a more permissive threshold while recording — fast-moving
+          // athletes can travel a long way between detection ticks. As long as
+          // we have a pose, we update the anchor so it follows the motion.
+          // Single-pose case (poses.length === 1) is the dominant scenario for
+          // most users and we should always adopt it.
+          const adoptThreshold = runningRef.current
+            ? TRACKING_DISTANCE_THRESHOLD * 3 // relaxed during recording
+            : TRACKING_DISTANCE_THRESHOLD;
+          if (bestDist > adoptThreshold && poses.length > 1) {
             targetIdx = -1;
           } else {
             targetAnchorRef.current = hipCenter(poses[targetIdx]);
@@ -467,48 +474,13 @@ export default function PoseCanvas({
                   };
                 }
               } else if (mode === "upload" && targetAnchorRef.current && runningRef.current) {
-                // Smart ROI: target is locked → run a single detection on a tile
-                // centered around the target's last-known hip position. Single
-                // inference (fast → keeps up with playback) and higher-resolution
-                // view of the target athlete. ROI follows the athlete frame-to-
-                // frame via the updated anchor in drawResults().
-                if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
-                const roiW = 0.5;
-                const roiH = 0.7;
-                const ax = targetAnchorRef.current.x;
-                const ay = targetAnchorRef.current.y;
-                const x0 = Math.max(0, Math.min(1 - roiW, ax - roiW / 2));
-                const y0 = Math.max(0, Math.min(1 - roiH, ay - roiH / 2));
-                const tw = 640;
-                const th = Math.round((roiH / roiW) * tw * (v.videoHeight / v.videoWidth)) || 480;
-                const cc = cropCanvasRef.current;
-                cc.width = tw;
-                cc.height = th;
-                const cctx = cc.getContext("2d");
-                cctx.drawImage(
-                  v,
-                  x0 * v.videoWidth, y0 * v.videoHeight,
-                  roiW * v.videoWidth, roiH * v.videoHeight,
-                  0, 0, tw, th
-                );
-                const ts = performance.now();
-                const r = lm.detectForVideo(cc, ts);
-                if (r && r.landmarks && r.landmarks.length) {
-                  result = {
-                    ...r,
-                    landmarks: r.landmarks.map((pose) =>
-                      pose.map((p) => ({
-                        ...p,
-                        x: x0 + p.x * roiW,
-                        y: y0 + p.y * roiH,
-                      }))
-                    ),
-                  };
-                } else {
-                  // ROI miss → fall back to full-frame so we don't lose the
-                  // athlete entirely if they walked outside the ROI bounds.
-                  result = lm.detectForVideo(v, ts + 1);
-                }
+                // Recording phase: plain full-frame detection at native resolution.
+                // Smart-ROI / tile-detection caused frozen-skeleton bugs because
+                // a stale or off-center ROI would persistently miss the athlete.
+                // Full-frame is reliable and fast enough for single-athlete
+                // tracking during playback; nearest-neighbour pose matching in
+                // drawResults() keeps the locked target identified.
+                result = lm.detectForVideo(v, performance.now());
               } else if (mode === "upload") {
                 // Selection phase (no target locked): full-frame + left/right
                 // half-tile detection with hip-center dedupe. Surfaces small or
@@ -553,8 +525,10 @@ export default function PoseCanvas({
               }
               drawResults(result);
             } catch (err) {
-              if (process.env.NODE_ENV !== "production")
-                console.debug("detect error", err);
+              // Log loudly so iOS Safari / WebGL issues surface in remote
+              // console viewers and aren't swallowed. Also tag the message so
+              // we can see it during debugging.
+              console.warn("[PoseCanvas] detect error", err);
             }
           }
           rafRef.current = requestAnimationFrame(tick);
@@ -730,11 +704,19 @@ export default function PoseCanvas({
     setStatus("running");
     const v = videoRef.current;
     if (v && mode === "upload") {
+      // Only seek backward if user is BEFORE the trim window. If they scrubbed
+      // forward to find their athlete, respect that position — otherwise we'd
+      // jump back to a frame where the athlete isn't visible and tracking would
+      // start from a stale anchor.
       try {
-        v.currentTime = Math.max(0, trimStart || 0);
+        const ts = trimStart || 0;
+        if (v.currentTime < ts) v.currentTime = ts;
       } catch {
         /* ignore */
       }
+      // Treat the locked anchor as freshly seen so the first detection during
+      // recording doesn't immediately enter the "tracking lost" grace period.
+      lastSeenAtRef.current = Date.now();
       const playPromise = v.play();
       if (playPromise && playPromise.catch) {
         playPromise.catch(() => {
