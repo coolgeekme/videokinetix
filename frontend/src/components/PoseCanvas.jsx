@@ -403,7 +403,7 @@ export default function PoseCanvas({
             try {
               let result;
               if (zoom > 1.001) {
-                // Crop the visible window into an offscreen canvas, run detection on that.
+                // Crop the visible zoom window into an offscreen canvas
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
                 const tw = 640;
                 const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
@@ -417,7 +417,6 @@ export default function PoseCanvas({
                 const sh = v.videoHeight / zoom;
                 cctx.drawImage(v, sx, sy, sw, sh, 0, 0, tw, th);
                 result = lm.detectForVideo(cc, performance.now());
-                // Map crop-local landmarks back to full-frame coords
                 if (result && result.landmarks) {
                   result = {
                     ...result,
@@ -430,6 +429,73 @@ export default function PoseCanvas({
                     ),
                   };
                 }
+              } else if (mode === "upload" && !hasTargetRef.current && !runningRef.current) {
+                // Selection phase on uploaded video: run detection on full frame
+                // PLUS left and right half-tiles. Merge results so distant athletes
+                // (small in full frame) get a higher-resolution view in their tile.
+                if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
+                const tw = 640;
+                const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
+                const cc = cropCanvasRef.current;
+                cc.width = tw;
+                cc.height = th;
+                const cctx = cc.getContext("2d");
+                const ts = performance.now();
+                const fullR = lm.detectForVideo(v, ts);
+                // Left tile: x in [0, 0.6] of full
+                cctx.drawImage(
+                  v,
+                  0,
+                  0,
+                  v.videoWidth * 0.6,
+                  v.videoHeight,
+                  0,
+                  0,
+                  tw,
+                  th
+                );
+                const leftR = lm.detectForVideo(cc, ts + 0.1);
+                // Right tile: x in [0.4, 1.0]
+                cctx.drawImage(
+                  v,
+                  v.videoWidth * 0.4,
+                  0,
+                  v.videoWidth * 0.6,
+                  v.videoHeight,
+                  0,
+                  0,
+                  tw,
+                  th
+                );
+                const rightR = lm.detectForVideo(cc, ts + 0.2);
+                const fullPoses = fullR?.landmarks || [];
+                const leftPoses = (leftR?.landmarks || []).map((pose) =>
+                  pose.map((p) => ({ ...p, x: p.x * 0.6, y: p.y }))
+                );
+                const rightPoses = (rightR?.landmarks || []).map((pose) =>
+                  pose.map((p) => ({ ...p, x: 0.4 + p.x * 0.6, y: p.y }))
+                );
+                const all = [...fullPoses, ...leftPoses, ...rightPoses];
+                // Dedupe by hip-center proximity, keep the most-visible duplicate
+                const dedup = [];
+                for (const p of all) {
+                  const c = hipCenter(p);
+                  if (!c) continue;
+                  const visSum = p.reduce(
+                    (s, pt) => s + (pt.visibility || 0),
+                    0
+                  );
+                  const dupIdx = dedup.findIndex((q) => {
+                    const qc = hipCenter(q.pose);
+                    return qc && dist2D(c, qc) < 0.07;
+                  });
+                  if (dupIdx === -1) {
+                    dedup.push({ pose: p, vis: visSum });
+                  } else if (visSum > dedup[dupIdx].vis) {
+                    dedup[dupIdx] = { pose: p, vis: visSum };
+                  }
+                }
+                result = { landmarks: dedup.map((d) => d.pose) };
               } else {
                 result = lm.detectForVideo(v, performance.now());
               }
