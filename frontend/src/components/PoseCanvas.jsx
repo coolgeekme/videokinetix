@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle } from "lucide-react";
+import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
@@ -99,6 +99,7 @@ export default function PoseCanvas({
   const [cameras, setCameras] = useState([]);
   const [cameraIndex, setCameraIndex] = useState(0);
   const [switching, setSwitching] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(true);
 
   // Zoom + pan (for selection precision and small-athlete detection)
   const [zoom, setZoom] = useState(1);
@@ -388,6 +389,8 @@ export default function PoseCanvas({
         } else if (mode === "upload" && videoSrc) {
           video.src = videoSrc;
           video.loop = false;
+          video.muted = true;
+          video.playsInline = true;
           await new Promise((resolve) => {
             if (video.readyState >= 1) resolve();
             else
@@ -395,6 +398,30 @@ export default function PoseCanvas({
                 once: true,
               });
           });
+          // iOS Safari quirk: <video> doesn't render any pixels (and detection
+          // returns 0 poses) until play() is called at least once. Briefly
+          // play→pause to warm up the decoder + skip any black opening frame.
+          try {
+            await video.play();
+            // Seek to the trim start (or just past 0) so we're not stuck on a
+            // potentially-blank first frame.
+            const seekTo = trimStart && trimStart > 0
+              ? trimStart
+              : Math.min(0.5, (video.duration || 1) * 0.05);
+            video.currentTime = seekTo;
+            await new Promise((r) => {
+              const onSeeked = () => {
+                video.removeEventListener("seeked", onSeeked);
+                r();
+              };
+              video.addEventListener("seeked", onSeeked);
+              setTimeout(r, 600);
+            });
+            video.pause();
+          } catch {
+            /* autoplay blocked — user will tap the play overlay */
+          }
+          setVideoPaused(video.paused);
         }
 
         setStatus("ready");
@@ -562,6 +589,33 @@ export default function PoseCanvas({
     }, 500);
     return () => clearInterval(interval);
   }, [running]);
+
+  /* ---------------- Video play/pause state sync (upload mode) ---------------- */
+  useEffect(() => {
+    if (mode !== "upload") return;
+    const v = videoRef.current;
+    if (!v) return;
+    const onPlay = () => setVideoPaused(false);
+    const onPause = () => setVideoPaused(true);
+    v.addEventListener("play", onPlay);
+    v.addEventListener("pause", onPause);
+    setVideoPaused(v.paused);
+    return () => {
+      v.removeEventListener("play", onPlay);
+      v.removeEventListener("pause", onPause);
+    };
+  }, [mode, videoSrc]);
+
+  const togglePlayPause = async () => {
+    const v = videoRef.current;
+    if (!v) return;
+    try {
+      if (v.paused) await v.play();
+      else v.pause();
+    } catch {
+      /* play promise rejected (autoplay policy) — user can tap again */
+    }
+  };
 
   /* ---------------- Pan / zoom handlers ---------------- */
   const onWheel = (e) => {
@@ -957,6 +1011,33 @@ export default function PoseCanvas({
           <div className="absolute inset-0 flex items-center justify-center bg-black/80 text-center p-6">
             <p className="text-sm text-red-400 max-w-md">{error}</p>
           </div>
+        )}
+
+        {/* Custom play/pause overlay (upload mode, when not recording).
+            Native <video controls> are blocked by the canvas overlay, so we
+            provide our own button. Bottom-left so it doesn't block athlete
+            selection in the center of the frame. */}
+        {mode === "upload" && !running && status === "ready" && !error && (
+          <button
+            type="button"
+            data-testid="video-play-pause-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              togglePlayPause();
+            }}
+            className="absolute bottom-3 left-3 inline-flex items-center gap-2 bg-black/70 backdrop-blur hover:bg-black/90 border border-white/30 px-3 py-2 transition-colors"
+            title={videoPaused ? "Play video" : "Pause video"}
+            aria-label={videoPaused ? "Play video" : "Pause video"}
+          >
+            {videoPaused ? (
+              <Play className="w-4 h-4 text-white" fill="white" />
+            ) : (
+              <Pause className="w-4 h-4 text-white" fill="white" />
+            )}
+            <span className="text-[11px] font-display uppercase tracking-widest font-bold text-white">
+              {videoPaused ? "Play" : "Pause"}
+            </span>
+          </button>
         )}
 
         {/* Zoom controls (bottom-right) */}

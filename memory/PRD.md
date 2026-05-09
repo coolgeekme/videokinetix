@@ -17,8 +17,11 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
 ## Implemented (Feb 2026 – v1.1)
-- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` in `PoseCanvas.jsx` that was silently swallowed by try/catch — meaning tile-detection NEVER ran. Tile detection now runs during selection so distant/small athletes get picked up via their higher-resolution tile view.
-- **Smart-ROI tracking during recording (Feb 2026)**: Once a target is locked, detection switches from 3x tile-detection to a **single** detection on a tile centered around the target's last hip position (50% wide × 70% tall, follows the athlete frame-to-frame). Single inference keeps up with playback motion + higher resolution view of the target. Falls back to full-frame if ROI misses.
+- **iOS Safari video render fix (Feb 2026)**: Uploaded videos rendered as a black frame on iOS until `.play()` was called (iOS quirk). Init now performs play→seek→pause to warm up the decoder + skip past the opening black frame. Detection now sees actual pixels from the get-go.
+- **Custom play/pause overlay (Feb 2026)**: Native `<video controls>` are blocked by the canvas overlay (which handles tap-to-select). Added a bottom-left Play/Pause pill button (`data-testid="video-play-pause-btn"`) so mobile users can scrub through the video to find an athlete-rich frame.
+- **Reset target on video change (Feb 2026)**: `targetAnchorRef` and tracking state now reset whenever `videoSrc`/`mode` changes — prevents stale anchor from a previous upload triggering smart-ROI on coordinates that no longer match.
+- **Smart-ROI tracking during recording (Feb 2026)**: Once a target is locked AND user clicks Start, detection switches from 3x tile-detection to a **single** detection on a tile (50% wide × 70% tall) centered around the target's last hip position. ROI follows the athlete frame-to-frame. Falls back to full-frame on ROI miss.
+- **Tile detection FIX (Feb 2026)**: Fixed `ReferenceError: hasTargetRef is not defined` in `PoseCanvas.jsx` that was silently swallowed by try/catch — meaning tile-detection NEVER ran. Selection phase now runs full-frame + left + right tile detection with hip-center dedupe so distant/small athletes appear in the multi-pose preview.
 
 ## Implemented (Feb 2026 – v1.0)
 - Auth: register / login / me  (`/api/auth/*`)
