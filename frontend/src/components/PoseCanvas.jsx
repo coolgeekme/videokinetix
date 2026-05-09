@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { SwitchCamera, Target, AlertTriangle } from "lucide-react";
+import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle } from "lucide-react";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
@@ -100,9 +100,42 @@ export default function PoseCanvas({
   const [cameraIndex, setCameraIndex] = useState(0);
   const [switching, setSwitching] = useState(false);
 
+  // Zoom + pan (for selection precision and small-athlete detection)
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 }); // normalized (0..1) top-left of view rect
+  const panningRef = useRef(null); // { startX, startY, panX, panY } during drag
+  const cropCanvasRef = useRef(null);
+
   const currentCam = cameras[cameraIndex];
   const isFrontCam =
     !currentCam || /front|user|face|selfie/i.test(currentCam.label || "");
+
+  // Clamp pan so view rect stays inside [0,1]
+  function clampPan(p, z) {
+    const max = Math.max(0, 1 - 1 / z);
+    return {
+      x: Math.min(Math.max(p.x, 0), max),
+      y: Math.min(Math.max(p.y, 0), max),
+    };
+  }
+
+  function changeZoom(nextZoom, focusNorm = { x: 0.5, y: 0.5 }) {
+    const z = Math.max(1, Math.min(4, nextZoom));
+    if (z === 1) {
+      setZoom(1);
+      setPan({ x: 0, y: 0 });
+      return;
+    }
+    // Keep focus point stable in screen — adjust pan so focusNorm in image stays at same screen pos
+    const screenX = (focusNorm.x - pan.x) * zoom; // 0..1 of current visible
+    const screenY = (focusNorm.y - pan.y) * zoom;
+    const newPan = clampPan(
+      { x: focusNorm.x - screenX / z, y: focusNorm.y - screenY / z },
+      z
+    );
+    setZoom(z);
+    setPan(newPan);
+  }
 
   /* ---------------- Drawing + per-frame logic ---------------- */
   const drawResults = useCallback(
@@ -361,9 +394,6 @@ export default function PoseCanvas({
           if (cancelled) return;
           const v = videoRef.current;
           const lm = landmarkerRef.current;
-          // In LIVE mode the camera always streams (so we require !paused).
-          // In UPLOAD mode we run detection even when paused so the user can
-          // see skeletons on the current frame and tap the target before pressing Start.
           const ready =
             v && lm && v.readyState >= 2 && v.videoWidth > 0;
           const shouldDetect =
@@ -371,7 +401,38 @@ export default function PoseCanvas({
             (mode === "live" ? !v.paused && !v.ended : true);
           if (shouldDetect) {
             try {
-              const result = lm.detectForVideo(v, performance.now());
+              let result;
+              if (zoom > 1.001) {
+                // Crop the visible window into an offscreen canvas, run detection on that.
+                if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
+                const tw = 640;
+                const th = Math.round((v.videoHeight / v.videoWidth) * tw) || 360;
+                const cc = cropCanvasRef.current;
+                cc.width = tw;
+                cc.height = th;
+                const cctx = cc.getContext("2d");
+                const sx = pan.x * v.videoWidth;
+                const sy = pan.y * v.videoHeight;
+                const sw = v.videoWidth / zoom;
+                const sh = v.videoHeight / zoom;
+                cctx.drawImage(v, sx, sy, sw, sh, 0, 0, tw, th);
+                result = lm.detectForVideo(cc, performance.now());
+                // Map crop-local landmarks back to full-frame coords
+                if (result && result.landmarks) {
+                  result = {
+                    ...result,
+                    landmarks: result.landmarks.map((pose) =>
+                      pose.map((p) => ({
+                        ...p,
+                        x: pan.x + p.x / zoom,
+                        y: pan.y + p.y / zoom,
+                      }))
+                    ),
+                  };
+                }
+              } else {
+                result = lm.detectForVideo(v, performance.now());
+              }
               drawResults(result);
             } catch (err) {
               if (process.env.NODE_ENV !== "production")
@@ -411,23 +472,66 @@ export default function PoseCanvas({
     return () => clearInterval(interval);
   }, [running]);
 
+  /* ---------------- Pan / zoom handlers ---------------- */
+  const onWheel = (e) => {
+    if (running) return;
+    e.preventDefault();
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const wx = (e.clientX - rect.left) / rect.width;
+    const wy = (e.clientY - rect.top) / rect.height;
+    // Convert wheel cursor to full-frame coords (not mirror-aware — fine for zoom focus)
+    const focus = { x: pan.x + wx / zoom, y: pan.y + wy / zoom };
+    const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+    changeZoom(zoom * factor, focus);
+  };
+  const onPointerDown = (e) => {
+    if (running || zoom <= 1.001) return;
+    if (e.target.closest("button")) return; // don't start pan on button clicks
+    panningRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      panX: pan.x,
+      panY: pan.y,
+      moved: false,
+    };
+  };
+  const onPointerMove = (e) => {
+    const p = panningRef.current;
+    if (!p) return;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const dx = (e.clientX - p.startX) / rect.width / zoom;
+    const dy = (e.clientY - p.startY) / rect.height / zoom;
+    if (Math.abs(dx) + Math.abs(dy) > 0.005) p.moved = true;
+    setPan(clampPan({ x: p.panX - dx, y: p.panY - dy }, zoom));
+  };
+  const onPointerUp = () => {
+    panningRef.current = null;
+  };
+
   /* ---------------- Subject selection click handler ---------------- */
   const handleCanvasClick = (e) => {
-    if (running) return; // can't change target mid-recording
+    if (running) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    let nx = (e.clientX - rect.left) / rect.width;
-    const ny = (e.clientY - rect.top) / rect.height;
-    // un-mirror click coords if the front camera is mirrored
-    if (mode === "live" && isFrontCam) nx = 1 - nx;
+    // Click position within the visible canvas (screen, post-transform)
+    const wx = (e.clientX - rect.left) / rect.width; // 0..1 visible
+    const wy = (e.clientY - rect.top) / rect.height;
+    // Convert to full-frame normalized coords (account for zoom/pan)
+    let nx = pan.x + wx / zoom;
+    let ny = pan.y + wy / zoom;
+    // Mirror compensation (front camera flip is applied via CSS scaleX(-1))
+    if (mode === "live" && isFrontCam) {
+      nx = pan.x + (1 - wx) / zoom;
+    }
     const click = { x: nx, y: ny };
     const poses = lastPosesRef.current;
     if (!poses.length) return;
     let bestIdx = -1;
     let bestDist = Infinity;
     poses.forEach((lm, i) => {
-      // compute centroid of upper body (shoulders + hips)
       const pts = [11, 12, 23, 24].map((k) => lm[k]).filter(Boolean);
       if (!pts.length) return;
       const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
@@ -438,7 +542,8 @@ export default function PoseCanvas({
         bestIdx = i;
       }
     });
-    if (bestIdx >= 0 && bestDist < 0.25) {
+    // Click radius scales inversely with zoom (smaller in image space when zoomed)
+    if (bestIdx >= 0 && bestDist < 0.25 / zoom) {
       const c = hipCenter(poses[bestIdx]);
       if (c) {
         targetAnchorRef.current = c;
@@ -455,6 +560,13 @@ export default function PoseCanvas({
     lastSeenAtRef.current = null;
     setHasTarget(false);
     setTrackingLost(false);
+  };
+
+  // Suppress click after a pan-drag so dragging doesn't accidentally lock onto someone
+  const handleCanvasClickGuarded = (e) => {
+    const p = panningRef.current;
+    if (p && p.moved) return;
+    handleCanvasClick(e);
   };
 
   /* ---------------- Capture controls ---------------- */
@@ -610,28 +722,44 @@ export default function PoseCanvas({
         ref={containerRef}
         data-testid="pose-canvas-container"
         className="relative bg-black border border-white/10 overflow-hidden aspect-video select-none"
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerUp}
+        style={{ cursor: zoom > 1 ? (panningRef.current ? "grabbing" : "grab") : "auto" }}
       >
-        <video
-          ref={videoRef}
-          data-testid="pose-video"
-          className="absolute inset-0 w-full h-full object-cover"
+        {/* Zoom + pan layer (also contains the mirror flip for the front camera) */}
+        <div
+          className="absolute inset-0"
           style={{
-            transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
+            transform: `scale(${zoom}) translate(${-pan.x * 100}%, ${-pan.y * 100}%)`,
+            transformOrigin: "0 0",
+            willChange: "transform",
           }}
-          playsInline
-          muted
-          controls={mode === "upload"}
-        />
-        <canvas
-          ref={canvasRef}
-          data-testid="pose-canvas"
-          onClick={handleCanvasClick}
-          className="absolute inset-0 w-full h-full cursor-crosshair"
-          style={{
-            transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
-            pointerEvents: mode === "upload" && !running ? "auto" : "auto",
-          }}
-        />
+        >
+          <video
+            ref={videoRef}
+            data-testid="pose-video"
+            className="absolute inset-0 w-full h-full object-cover"
+            style={{
+              transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
+            }}
+            playsInline
+            muted
+            controls={mode === "upload" && zoom <= 1}
+          />
+          <canvas
+            ref={canvasRef}
+            data-testid="pose-canvas"
+            onClick={handleCanvasClickGuarded}
+            className="absolute inset-0 w-full h-full cursor-crosshair"
+            style={{
+              transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
+              pointerEvents: "auto",
+            }}
+          />
+        </div>
         <div className="absolute inset-0 pointer-events-none grid-bg opacity-30" />
 
         {/* status pill (top-left) */}
@@ -739,6 +867,54 @@ export default function PoseCanvas({
             <p className="text-sm text-red-400 max-w-md">{error}</p>
           </div>
         )}
+
+        {/* Zoom controls (bottom-right) */}
+        <div className="absolute bottom-3 right-3 flex flex-col gap-1.5 pointer-events-auto">
+          <button
+            type="button"
+            data-testid="zoom-in-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              changeZoom(zoom * 1.4);
+            }}
+            disabled={zoom >= 4}
+            className="w-9 h-9 inline-flex items-center justify-center bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-30 border border-white/10 transition-colors"
+            title="Zoom in"
+          >
+            <ZoomIn className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            data-testid="zoom-out-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              changeZoom(zoom / 1.4);
+            }}
+            disabled={zoom <= 1.001}
+            className="w-9 h-9 inline-flex items-center justify-center bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-30 border border-white/10 transition-colors"
+            title="Zoom out"
+          >
+            <ZoomOut className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            data-testid="zoom-reset-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              changeZoom(1);
+            }}
+            disabled={zoom <= 1.001}
+            className="w-9 h-9 inline-flex items-center justify-center bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-30 border border-white/10 transition-colors"
+            title="Reset zoom"
+          >
+            <Maximize2 className="w-4 h-4" />
+          </button>
+          {zoom > 1.001 && (
+            <div className="text-[10px] font-mono text-zinc-300 text-center bg-black/70 backdrop-blur border border-white/10 px-1 py-0.5 mt-1">
+              {zoom.toFixed(1)}×
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="flex gap-3">
