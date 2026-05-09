@@ -305,6 +305,16 @@ export default function PoseCanvas({
     [mode, isFrontCam, trackingLost]
   );
 
+  /* ---------------- Reset target tracking when video source changes ---------------- */
+  useEffect(() => {
+    targetAnchorRef.current = null;
+    lastSeenAtRef.current = null;
+    lastPosesRef.current = [];
+    setHasTarget(false);
+    setTrackingLost(false);
+    setPersonCount(0);
+  }, [videoSrc, mode]);
+
   /* ---------------- Pose model + camera setup ---------------- */
   useEffect(() => {
     let cancelled = false;
@@ -429,7 +439,7 @@ export default function PoseCanvas({
                     ),
                   };
                 }
-              } else if (mode === "upload" && targetAnchorRef.current) {
+              } else if (mode === "upload" && targetAnchorRef.current && runningRef.current) {
                 // Smart ROI: target is locked → run a single detection on a tile
                 // centered around the target's last-known hip position. Single
                 // inference (fast → keeps up with playback) and higher-resolution
