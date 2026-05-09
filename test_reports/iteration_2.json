@@ -1,0 +1,36 @@
+{
+  "summary": "Backend regression + feature testing for the new basketball make/miss tracking pipeline. 35/35 pytest cases pass against the public preview URL with live GPT-5.2 calls. Covers: top-level persistence of shot_outcomes & makes_vs_misses on POST /api/sessions, retrieval via GET /api/sessions/{id}, AI analysis correlating makes vs misses (verified the LLM summary references makes/attempts/FG markers), training-plan generation that targets the largest form-delta factor, plus regression on basketball-without-outcomes and non-basketball (soccer) sports. Existing flows (auth, athletes, sessions, dashboard, goals, isolation) all still pass after the schema additions.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/sessions", "issue": "shot_outcomes/makes_vs_misses are extracted from pose_summary but the originals are NOT removed from pose_summary_clean before persisting, so the same data is stored twice (top-level + nested). Harmless but bloats the document."},
+      {"endpoint": "POST /api/sessions/{id}/training-plan", "issue": "Still no idempotency — calling twice creates duplicate plan rows in db.training_plans (carry-over from iteration_1)."},
+      {"endpoint": "ai_service.analyze_form", "issue": "If GPT-5.2 returns malformed JSON, falls back silently to a stub (form_score=70) without surfacing a fallback flag (carry-over from iteration_1)."}
+    ]
+  },
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": []},
+  "test_report_links": [
+    "/app/backend/tests/backend_test.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) In server.py POST /api/sessions, pop 'shot_outcomes' and 'makes_vs_misses' out of pose_summary_clean after extracting to avoid duplicate storage.",
+    "(Optional) Carry-over: surface analysis_fallback flag and de-dup training plan rows."
+  ],
+  "critical_code_review_comments": [
+    "server.py: shot_outcomes/makes_vs_misses are read from pose_summary_clean but never removed, leading to duplicate persistence. Consider pose_summary_clean.pop('shot_outcomes', None) and pose_summary_clean.pop('makes_vs_misses', None) after extraction.",
+    "ai_service.py outcome_block uses an f-string concatenation pattern that is correct but a bit fragile — the trailing ' ' before -When SHOT OUTCOMES…' line gets a leading space inside the conditional. Cosmetic only.",
+    "ai_service.py generate_training_plan reads shot_outcomes from analysis dict; analyze_form re-attaches them only when present, so this is consistent. Good.",
+    "Existing iteration_1 carry-overs still applicable: deprecated @app.on_event('shutdown'); _compute_streak imports inside loop; no pagination on list endpoints."
+  ],
+  "updated_files": [
+    "/app/backend/tests/backend_test.py"
+  ],
+  "success_rate": {"backend": "100% (35/35)", "frontend": "not tested (per request)"},
+  "test_credentials": "Tests register their own users with @example.com emails (TEST_alpha_*, TEST_beta_*).",
+  "seed_data_creation": "Per pytest run: 2 users (alpha + beta), 1 'Me' athlete each (auto-created), 3 basketball sessions (1 plain, 1 with shot_outcomes, 1 regression), 1 soccer regression session, 1 training plan, ~5 goals on alpha. All entries TEST_-prefixed.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Run with: pytest /app/backend/tests/backend_test.py -v (uses REACT_APP_BACKEND_URL from frontend/.env). Total runtime ~2.5 min (4 live GPT-5.2 calls). New TestShotOutcomes class covers the full make/miss feature: persistence, retrieval, AI summary correlation, plan generation, and regressions. Frontend (PoseCanvas + SessionDetail shooting card) was NOT tested because MediaPipe loads via CDN/WebGL inside the browser and headless Playwright cannot reliably exercise it — main agent confirmed this in the review request.",
+  "rca of the issue": "No bug to RCA — feature works end-to-end. The only minor finding is that shot_outcomes/makes_vs_misses are persisted twice (top-level + still inside pose_summary). Not a functional issue."
+}

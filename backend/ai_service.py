@@ -16,7 +16,7 @@ MODEL_NAME = "gpt-5.2"
 
 SPORT_CONTEXT = {
     "basketball": {
-        "key_metrics": "shooting elbow alignment, knee bend depth, follow-through, jump symmetry, balance",
+        "key_metrics": "shooting elbow alignment, knee bend depth, follow-through, jump symmetry, balance, release angle",
         "elite_benchmark": "Stephen Curry / Klay Thompson shooting form: 90° elbow load → full extension at release, snap wrist, 45-55° launch angle.",
         "rep_unit": "shot",
     },
@@ -102,19 +102,37 @@ async def analyze_form(sport: str, pose_summary: dict[str, Any]) -> dict:
         "You are an elite biomechanics coach analysing motion-capture data. "
         "You return STRICT JSON only — no markdown, no commentary outside the JSON object."
     )
+
+    # Build basketball-specific outcome-correlation block when shot data is present
+    outcome_block = ""
+    shot_outcomes = pose_summary.get("shot_outcomes")
+    makes_vs_misses = pose_summary.get("makes_vs_misses")
+    if sport == "basketball" and shot_outcomes:
+        outcome_block = f"""
+
+SHOT OUTCOMES (from ball-tracking + hoop ROI):
+- Attempts: {shot_outcomes.get('attempts')}
+- Makes:    {shot_outcomes.get('makes')}
+- FG%:      {shot_outcomes.get('fg_pct')}%
+"""
+        if makes_vs_misses:
+            outcome_block += "\nFORM CORRELATIONS — average measurement on MAKES vs MISSES (delta = makes_avg - misses_avg):\n"
+            outcome_block += json.dumps(makes_vs_misses, indent=2)
+            outcome_block += "\nIDENTIFY the 1-2 measurements with the largest absolute delta — these are the form factors most correlated with missed shots."
+
     prompt = f"""Analyse this {sport} performance using the per-rep kinematic data.
 
 KEY METRICS FOR {sport.upper()}: {ctx['key_metrics']}
 ELITE BENCHMARK: {ctx['elite_benchmark']}
 
 SESSION DATA (each rep is one {ctx['rep_unit']}; angles are degrees, all measurements at the rep apex):
-{json.dumps(_compact_for_prompt(pose_summary), indent=2)}
+{json.dumps(_compact_for_prompt(pose_summary), indent=2)}{outcome_block}
 
 Notes for your analysis:
 - The local rep score (0-100) measures how each rep matched target biomechanical bands.
 - Overall_score is the mean of rep scores. Consistency is 100 - 1.5×stddev of rep scores.
 - Comment on the WORST rep specifically — what failed mechanically, what to drill.
-- If rep_count is low (<3), note that more reps are needed for a confident assessment.
+- If rep_count is low (<3), note that more reps are needed for a confident assessment.{(' - When SHOT OUTCOMES is present, your "summary" MUST cite makes/attempts/FG% and your top "improvements" MUST be the form factors most correlated with misses (largest delta).') if outcome_block else ''}
 
 Return ONLY this JSON:
 {{
@@ -150,6 +168,10 @@ Return ONLY this JSON:
     result.setdefault("rep_count", rep_count)
     result.setdefault("consistency", consistency)
     result["overall_score"] = overall
+    if shot_outcomes:
+        result["shot_outcomes"] = shot_outcomes
+    if makes_vs_misses:
+        result["makes_vs_misses"] = makes_vs_misses
     return result
 
 
@@ -158,10 +180,25 @@ async def generate_training_plan(sport: str, analysis: dict, athlete_level: str 
         "You are an elite sports performance coach designing personalized training programs. "
         "Return STRICT JSON only — no markdown, no commentary."
     )
+    outcome_hint = ""
+    shot_outcomes = analysis.get("shot_outcomes") if isinstance(analysis, dict) else None
+    makes_vs_misses = analysis.get("makes_vs_misses") if isinstance(analysis, dict) else None
+    if sport == "basketball" and shot_outcomes:
+        outcome_hint = (
+            f"\n\nThis athlete shot {shot_outcomes.get('makes')}/{shot_outcomes.get('attempts')}"
+            f" ({shot_outcomes.get('fg_pct')}% FG)."
+        )
+        if makes_vs_misses:
+            outcome_hint += (
+                "\nMake-vs-miss form deltas (focus drills around the largest deltas):\n"
+                f"{json.dumps(makes_vs_misses, indent=2)}"
+            )
+            outcome_hint += "\nAt least 3 of the 7 days MUST include a drill explicitly targeting the form factor with the largest delta between makes and misses."
+
     prompt = f"""Design a 7-day personalized training plan for a {athlete_level} {sport} athlete based on their form analysis.
 
 FORM ANALYSIS:
-{json.dumps(analysis, indent=2)}
+{json.dumps(analysis, indent=2)}{outcome_hint}
 
 Return ONLY this JSON (no extra text):
 {{

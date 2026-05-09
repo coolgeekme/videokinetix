@@ -176,17 +176,60 @@ export default function SessionDetail() {
                   return (
                     <div
                       key={r.index}
-                      title={`Rep ${r.index}: ${s}`}
-                      className="flex-1 transition-opacity hover:opacity-80"
+                      title={`Rep ${r.index}: ${s}${typeof r.made === "boolean" ? (r.made ? " · MAKE" : " · MISS") : ""}`}
+                      className="flex-1 transition-opacity hover:opacity-80 relative"
                       style={{
                         height: `${Math.max(6, s)}%`,
                         background: color,
                         minWidth: 4,
                       }}
-                    />
+                    >
+                      {typeof r.made === "boolean" && (
+                        <span
+                          className="absolute -top-3 left-1/2 -translate-x-1/2 text-[8px] font-bold"
+                          style={{ color: r.made ? "#00ff88" : "#ff3b30" }}
+                        >
+                          {r.made ? "✓" : "✗"}
+                        </span>
+                      )}
+                    </div>
                   );
                 })}
               </div>
+            </div>
+          )}
+
+          {/* Basketball: Shooting stats card */}
+          {session.sport === "basketball" && session.shot_outcomes && (
+            <div className="mt-6 border-t border-white/10 pt-4" data-testid="shooting-stats">
+              <div className="text-[10px] uppercase tracking-widest text-[#00e5ff] font-display font-bold mb-2">
+                Shooting · ball-tracked
+              </div>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div>
+                  <div className="font-display font-black text-3xl" style={{ color: "#00ff88" }}>
+                    {session.shot_outcomes.makes ?? 0}
+                  </div>
+                  <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">Makes</div>
+                </div>
+                <div>
+                  <div className="font-display font-black text-3xl text-white">
+                    {session.shot_outcomes.attempts ?? 0}
+                  </div>
+                  <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">Attempts</div>
+                </div>
+                <div>
+                  <div className="font-display font-black text-3xl" style={{ color: "#00e5ff" }}>
+                    {session.shot_outcomes.fg_pct != null ? `${session.shot_outcomes.fg_pct}%` : "—"}
+                  </div>
+                  <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">FG%</div>
+                </div>
+              </div>
+              {session.makes_vs_misses && Object.keys(session.makes_vs_misses).length > 0 && (
+                <div className="mt-3 text-[10px] text-zinc-500 leading-snug">
+                  AI plan now targets the form factors most correlated with misses.
+                </div>
+              )}
             </div>
           )}
         </div>

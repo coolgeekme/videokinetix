@@ -381,6 +381,8 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
     # at the top-level of the session doc, and keep the pose_summary lighter.
     pose_summary_clean = {k: v for k, v in (req.pose_summary or {}).items() if k != "keyframes"}
     keyframes = (req.pose_summary or {}).get("keyframes") or {}
+    shot_outcomes = pose_summary_clean.get("shot_outcomes")
+    makes_vs_misses = pose_summary_clean.get("makes_vs_misses")
 
     session_id = str(uuid.uuid4())
     doc = {
@@ -395,6 +397,8 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
         "rep_count": pose_summary_clean.get("rep_count", 0),
         "reps": pose_summary_clean.get("reps", []),
         "consistency": pose_summary_clean.get("consistency"),
+        "shot_outcomes": shot_outcomes,
+        "makes_vs_misses": makes_vs_misses,
         "notes": req.notes,
         "analysis": analysis,
         "form_score": int(analysis.get("form_score", 70)),

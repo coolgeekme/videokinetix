@@ -81,9 +81,31 @@ def user_b(session):
 
 
 @pytest.fixture(scope="module")
-def alpha_session(session, user_a):
+def alpha_athlete_id(session, user_a):
+    """Get the auto-created 'Me' athlete id for user_a."""
+    r = session.get(f"{API}/athletes", headers=user_a["headers"], timeout=DEFAULT_TIMEOUT)
+    assert r.status_code == 200
+    items = r.json()["athletes"]
+    self_a = next((a for a in items if a.get("is_self")), None)
+    assert self_a is not None, f"no self athlete found: {items}"
+    return self_a["id"]
+
+
+@pytest.fixture(scope="module")
+def beta_athlete_id(session, user_b):
+    r = session.get(f"{API}/athletes", headers=user_b["headers"], timeout=DEFAULT_TIMEOUT)
+    assert r.status_code == 200
+    items = r.json()["athletes"]
+    self_a = next((a for a in items if a.get("is_self")), None)
+    assert self_a is not None
+    return self_a["id"]
+
+
+@pytest.fixture(scope="module")
+def alpha_session(session, user_a, alpha_athlete_id):
     """Create one real session for alpha (live GPT call) reused across tests."""
     payload = {
+        "athlete_id": alpha_athlete_id,
         "sport": "basketball",
         "mode": "live",
         "duration_seconds": 12.5,
@@ -216,19 +238,19 @@ class TestSessions:
         assert isinstance(s["form_score"], int)
         assert 0 <= s["form_score"] <= 100
 
-    def test_create_session_invalid_sport(self, session, user_a):
+    def test_create_session_invalid_sport(self, session, user_a, alpha_athlete_id):
         r = session.post(
             f"{API}/sessions",
-            json={"sport": "cricket", "mode": "live", "pose_summary": {}},
+            json={"athlete_id": alpha_athlete_id, "sport": "cricket", "mode": "live", "pose_summary": {}},
             headers=user_a["headers"],
             timeout=DEFAULT_TIMEOUT,
         )
         assert r.status_code == 400
 
-    def test_create_session_unauthenticated(self, session):
+    def test_create_session_unauthenticated(self, session, alpha_athlete_id):
         r = session.post(
             f"{API}/sessions",
-            json={"sport": "soccer", "mode": "upload", "pose_summary": {}},
+            json={"athlete_id": alpha_athlete_id, "sport": "soccer", "mode": "upload", "pose_summary": {}},
             timeout=DEFAULT_TIMEOUT,
         )
         assert r.status_code == 401
@@ -347,10 +369,11 @@ class TestDashboard:
 
 # ---------- Goals ----------
 class TestGoals:
-    def test_create_and_list_goal(self, session, user_a):
+    def test_create_and_list_goal(self, session, user_a, alpha_athlete_id):
         r = session.post(
             f"{API}/goals",
             json={
+                "athlete_id": alpha_athlete_id,
                 "sport": "basketball",
                 "title": "TEST_ Reach 90 form score",
                 "target_score": 90,
@@ -372,11 +395,11 @@ class TestGoals:
         ids = [x["id"] for x in r2.json()["goals"]]
         assert gid in ids
 
-    def test_update_goal_progress_and_completion(self, session, user_a):
+    def test_update_goal_progress_and_completion(self, session, user_a, alpha_athlete_id):
         # create
         r = session.post(
             f"{API}/goals",
-            json={"sport": "soccer", "title": "TEST_ Soccer plant foot drill", "target_score": 80},
+            json={"athlete_id": alpha_athlete_id, "sport": "soccer", "title": "TEST_ Soccer plant foot drill", "target_score": 80},
             headers=user_a["headers"],
             timeout=DEFAULT_TIMEOUT,
         )
@@ -410,10 +433,10 @@ class TestGoals:
         assert body["goals_completed"] >= 1
         assert body["goals_total"] >= body["goals_completed"]
 
-    def test_update_goal_empty_payload(self, session, user_a):
+    def test_update_goal_empty_payload(self, session, user_a, alpha_athlete_id):
         r = session.post(
             f"{API}/goals",
-            json={"sport": "swimming", "title": "TEST_ swim", "target_score": 75},
+            json={"athlete_id": alpha_athlete_id, "sport": "swimming", "title": "TEST_ swim", "target_score": 75},
             headers=user_a["headers"],
             timeout=DEFAULT_TIMEOUT,
         )
@@ -432,11 +455,11 @@ class TestGoals:
         )
         assert r.status_code == 404
 
-    def test_user_b_cannot_update_user_a_goal(self, session, user_a, user_b):
+    def test_user_b_cannot_update_user_a_goal(self, session, user_a, user_b, alpha_athlete_id):
         # user_a creates goal
         r = session.post(
             f"{API}/goals",
-            json={"sport": "pickleball", "title": "TEST_ private goal", "target_score": 70},
+            json={"athlete_id": alpha_athlete_id, "sport": "pickleball", "title": "TEST_ private goal", "target_score": 70},
             headers=user_a["headers"],
             timeout=DEFAULT_TIMEOUT,
         )
@@ -454,3 +477,187 @@ class TestGoals:
         r = session.get(f"{API}/goals", headers=user_b["headers"], timeout=DEFAULT_TIMEOUT)
         assert r.status_code == 200
         assert r.json()["goals"] == []
+
+
+# ---------- NEW: Basketball shot_outcomes / makes_vs_misses (live GPT-5.2) ----------
+class TestShotOutcomes:
+    """Verifies the new ball-trajectory + hoop-ROI outcome correlation pipeline."""
+
+    SHOT_POSE_SUMMARY = {
+        "rep_count": 8,
+        "overall_score": 74,
+        "consistency": 78,
+        "reps": [
+            {"index": i, "score": 70 + (i % 5), "elbow_angle": 165 if i < 5 else 148}
+            for i in range(8)
+        ],
+        "shot_outcomes": {
+            "makes": 5,
+            "attempts": 8,
+            "fg_pct": 63,
+            "shots": [
+                {"t": 1.2, "outcome": "make"},
+                {"t": 2.4, "outcome": "make"},
+                {"t": 3.7, "outcome": "miss"},
+                {"t": 5.1, "outcome": "make"},
+                {"t": 6.5, "outcome": "miss"},
+                {"t": 7.9, "outcome": "make"},
+                {"t": 9.3, "outcome": "miss"},
+                {"t": 10.7, "outcome": "make"},
+            ],
+        },
+        "makes_vs_misses": {
+            "shooting_elbow_angle": {
+                "makes_avg": 165.2,
+                "misses_avg": 148.7,
+                "delta": 16.5,
+                "makes_n": 5,
+                "misses_n": 3,
+            },
+            "knee_bend_depth": {
+                "makes_avg": 122.4,
+                "misses_avg": 118.9,
+                "delta": 3.5,
+                "makes_n": 5,
+                "misses_n": 3,
+            },
+        },
+    }
+
+    @pytest.fixture(scope="class")
+    def shot_session(self, session, user_a, alpha_athlete_id):
+        payload = {
+            "athlete_id": alpha_athlete_id,
+            "sport": "basketball",
+            "mode": "upload",
+            "duration_seconds": 12.0,
+            "pose_summary": self.SHOT_POSE_SUMMARY,
+            "notes": "TEST_ shot outcomes session",
+        }
+        r = session.post(
+            f"{API}/sessions", json=payload, headers=user_a["headers"], timeout=LLM_TIMEOUT
+        )
+        assert r.status_code == 200, f"create failed: {r.status_code} {r.text}"
+        return r.json()
+
+    def test_session_persists_shot_outcomes_at_top_level(self, shot_session):
+        # Top-level fields populated
+        assert "shot_outcomes" in shot_session
+        assert "makes_vs_misses" in shot_session
+        so = shot_session["shot_outcomes"]
+        assert so["makes"] == 5
+        assert so["attempts"] == 8
+        assert so["fg_pct"] == 63
+        assert isinstance(so.get("shots"), list)
+        assert len(so["shots"]) == 8
+
+        mvm = shot_session["makes_vs_misses"]
+        assert "shooting_elbow_angle" in mvm
+        assert mvm["shooting_elbow_angle"]["delta"] == 16.5
+
+    def test_get_session_returns_shot_outcomes(self, session, user_a, shot_session):
+        sid = shot_session["id"]
+        r = session.get(f"{API}/sessions/{sid}", headers=user_a["headers"], timeout=DEFAULT_TIMEOUT)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["shot_outcomes"]["makes"] == 5
+        assert body["shot_outcomes"]["attempts"] == 8
+        assert body["makes_vs_misses"]["shooting_elbow_angle"]["delta"] == 16.5
+
+    def test_analysis_references_makes_attempts(self, shot_session):
+        a = shot_session["analysis"]
+        # Required AI fields present
+        for k in ("form_score", "summary", "improvements", "elite_comparison", "next_focus"):
+            assert k in a, f"missing analysis key: {k}"
+        # The deterministic copy of shot_outcomes should be re-attached to analysis
+        assert a.get("shot_outcomes", {}).get("makes") == 5
+        assert a.get("makes_vs_misses", {}).get("shooting_elbow_angle", {}).get("delta") == 16.5
+        # The summary should reference makes/attempts/FG numbers — we look for any
+        # of "5", "8", "63", or the words make/miss/FG to be tolerant of LLM phrasing.
+        text = (
+            (a.get("summary") or "")
+            + " "
+            + " ".join(
+                (imp.get("issue", "") + " " + imp.get("fix", ""))
+                for imp in a.get("improvements", [])
+                if isinstance(imp, dict)
+            )
+        ).lower()
+        markers = ["make", "miss", "fg", "5/8", "63", "attempt"]
+        assert any(m in text for m in markers), (
+            f"analysis text does not reference shot outcomes. summary={a.get('summary')!r}"
+        )
+
+    def test_training_plan_references_outcomes(self, session, user_a, shot_session):
+        sid = shot_session["id"]
+        r = session.post(
+            f"{API}/sessions/{sid}/training-plan",
+            headers=user_a["headers"],
+            timeout=LLM_TIMEOUT,
+        )
+        assert r.status_code == 200, f"plan failed: {r.text}"
+        plan = r.json()
+        assert plan["sport"] == "basketball"
+        assert isinstance(plan.get("weekly_schedule"), list)
+        # Check all drill text for references to elbow / form / shooting cues
+        all_text = " ".join(
+            [plan.get("title", "")]
+            + plan.get("focus_areas", [])
+            + plan.get("form_cues", [])
+            + [
+                (d.get("name", "") + " " + d.get("purpose", "") + " " + d.get("cue", ""))
+                for day in plan.get("weekly_schedule", [])
+                for d in day.get("drills", [])
+            ]
+        ).lower()
+        # Should mention elbow (largest delta) or shooting-related cues
+        assert any(k in all_text for k in ["elbow", "shoot", "release", "follow", "form"]), (
+            f"plan does not reference shooting form: {all_text[:500]}"
+        )
+
+    # ---------- Regression: basketball without shot_outcomes still works ----------
+    def test_basketball_without_shot_outcomes_still_works(self, session, user_a, alpha_athlete_id):
+        payload = {
+            "athlete_id": alpha_athlete_id,
+            "sport": "basketball",
+            "mode": "live",
+            "duration_seconds": 8.0,
+            "pose_summary": {
+                "rep_count": 4,
+                "overall_score": 70,
+                "reps": [{"index": i, "score": 70 + i} for i in range(4)],
+            },
+        }
+        r = session.post(
+            f"{API}/sessions", json=payload, headers=user_a["headers"], timeout=LLM_TIMEOUT
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["sport"] == "basketball"
+        assert body.get("shot_outcomes") is None
+        assert body.get("makes_vs_misses") is None
+        assert "analysis" in body
+        assert "form_score" in body["analysis"]
+
+    # ---------- Regression: non-basketball still works ----------
+    def test_soccer_session_unaffected(self, session, user_a, alpha_athlete_id):
+        payload = {
+            "athlete_id": alpha_athlete_id,
+            "sport": "soccer",
+            "mode": "upload",
+            "duration_seconds": 9.0,
+            "pose_summary": {
+                "rep_count": 3,
+                "overall_score": 72,
+                "reps": [{"index": i, "score": 72 + i} for i in range(3)],
+            },
+        }
+        r = session.post(
+            f"{API}/sessions", json=payload, headers=user_a["headers"], timeout=LLM_TIMEOUT
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["sport"] == "soccer"
+        assert body.get("shot_outcomes") is None
+        assert body.get("makes_vs_misses") is None
+        assert "analysis" in body

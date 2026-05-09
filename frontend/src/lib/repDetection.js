@@ -12,7 +12,11 @@
  *  - For each peak (the rep "apex"), we measure sport-specific joint angles in a
  *    small window around the peak.
  *  - We score each rep 0-100 against a target band, then aggregate.
+ *  - For basketball: integrates ball-tracking shot outcomes (make/miss) and
+ *    annotates each rep with its shot result.
  */
+
+import { detectShots, annotateRepsWithOutcomes, makesVsMissesStats } from "./shotDetection";
 
 // MediaPipe BlazePose 33 landmark indices
 const L = {
@@ -281,9 +285,14 @@ function summarizeArray(arr) {
  * Main entry point.
  * frames: [{ t, lm }] sorted by t
  * sport: sport id
+ * options: {
+ *   ballFrames?: [{ t, x, y, conf } | null]  — basketball ball positions
+ *   hoopRoi?: { x, y, w, h }                  — basketball hoop rectangle (normalized)
+ * }
  * Returns: rich session summary
  */
-export function analyzeSession(frames, sport) {
+export function analyzeSession(frames, sport, options = {}) {
+  const { ballFrames = null, hoopRoi = null } = options;
   const cfg = SPORTS[sport];
   if (!cfg || frames.length < 5) {
     return {
@@ -406,19 +415,31 @@ export function analyzeSession(frames, sport) {
     }
   }
 
+  // Basketball-specific: shot make/miss detection from ball trajectory + hoop ROI
+  let shot_outcomes = null;
+  let makes_vs_misses = null;
+  let annotatedReps = reps;
+  if (sport === "basketball" && ballFrames && hoopRoi) {
+    shot_outcomes = detectShots(ballFrames, hoopRoi);
+    annotatedReps = annotateRepsWithOutcomes(reps, shot_outcomes.shots);
+    makes_vs_misses = makesVsMissesStats(annotatedReps);
+  }
+
   return {
     sport,
-    rep_count: reps.length,
+    rep_count: annotatedReps.length,
     duration_seconds: +duration.toFixed(2),
     fps_estimate: +fps.toFixed(1),
     overall_score: overall,
     consistency,
-    reps,
+    reps: annotatedReps,
     best_rep,
     worst_rep,
     summary_stats,
     coaching_cues: cues,
-    no_reps_detected: reps.length === 0,
+    no_reps_detected: annotatedReps.length === 0,
+    shot_outcomes,
+    makes_vs_misses,
   };
 }
 

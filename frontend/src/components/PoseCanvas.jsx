@@ -49,6 +49,33 @@ async function loadPoseLandmarker() {
   return landmarkerLoaderPromise;
 }
 
+let ballDetectorLoaderPromise = null;
+async function loadBallDetector() {
+  if (ballDetectorLoaderPromise) return ballDetectorLoaderPromise;
+  ballDetectorLoaderPromise = (async () => {
+    const mod = await import(
+      /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/+esm"
+    );
+    const { ObjectDetector, FilesetResolver } = mod;
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/wasm"
+    );
+    const detector = await ObjectDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite",
+        delegate: "GPU",
+      },
+      scoreThreshold: 0.25,
+      runningMode: "VIDEO",
+      categoryAllowlist: ["sports ball"],
+      maxResults: 3,
+    });
+    return detector;
+  })();
+  return ballDetectorLoaderPromise;
+}
+
 function hipCenter(lm) {
   const lh = lm[23];
   const rh = lm[24];
@@ -91,6 +118,80 @@ export default function PoseCanvas({
   const [hasTarget, setHasTarget] = useState(false);
   const [trackingLost, setTrackingLost] = useState(false);
   const [personCount, setPersonCount] = useState(0);
+
+  // Basketball: ball trajectory + hoop ROI for make/miss detection
+  const ballDetectorRef = useRef(null);
+  const ballFramesRef = useRef([]); // {t, x, y, conf}[] during recording (only when target is locked + running)
+  const lastBallRef = useRef(null); // most recent detected ball {x, y, conf} (live preview)
+  const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
+  const ballDetectFrameSkipRef = useRef(0);
+  const hoopRoiRef = useRef(null); // mirror of hoopRoi state for rAF reads
+  const [hoopRoi, setHoopRoi] = useState(null); // {x, y, w, h} normalized
+  const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'ready'
+  const [liveMakes, setLiveMakes] = useState(0);
+  const [liveAttempts, setLiveAttempts] = useState(0);
+  const liveShotStateRef = useRef({
+    inAttempt: false,
+    apex: null,
+    crossedTop: false,
+    crossedBottom: false,
+    lastShotEndT: -Infinity,
+  });
+
+  // Keep hoopRoiRef in sync with state
+  useEffect(() => {
+    hoopRoiRef.current = hoopRoi;
+  }, [hoopRoi]);
+
+  // Live shot state machine: mirrors shotDetection.js logic for real-time UX
+  function evaluateLiveShot(t, ball) {
+    const hoop = hoopRoiRef.current;
+    if (!hoop) return;
+    const state = liveShotStateRef.current;
+    const COOLDOWN_S = 1.0;
+    if (t - state.lastShotEndT < COOLDOWN_S) return;
+    const hoopTop = hoop.y;
+    const hoopBottom = hoop.y + hoop.h;
+    const hoopLeft = hoop.x;
+    const hoopRight = hoop.x + hoop.w;
+    // Track apex (highest = lowest y) when ball is well above hoop
+    const aboveHoop = ball.y < hoopTop - hoop.h * 0.5;
+    if (aboveHoop && (!state.apex || ball.y < state.apex.y)) {
+      state.apex = ball;
+      state.inAttempt = true;
+      state.crossedTop = false;
+      state.crossedBottom = false;
+    }
+    if (!state.inAttempt || !state.apex) return;
+    // Watch for crossings during descent
+    const inHoopX = ball.x >= hoopLeft && ball.x <= hoopRight;
+    if (inHoopX) {
+      if (!state.crossedTop && state.lastBall && state.lastBall.y <= hoopTop && ball.y > hoopTop) {
+        state.crossedTop = true;
+      }
+      if (state.crossedTop && !state.crossedBottom && state.lastBall && state.lastBall.y <= hoopBottom && ball.y > hoopBottom) {
+        state.crossedBottom = true;
+        // MAKE detected
+        setLiveMakes((m) => m + 1);
+        setLiveAttempts((a) => a + 1);
+        state.lastShotEndT = t;
+        state.inAttempt = false;
+        state.apex = null;
+      }
+    }
+    // Outcome window: if ball has fallen well below hoop without a make, count as miss
+    if (state.inAttempt && ball.y > hoopBottom + hoop.h * 2) {
+      if (!state.crossedBottom) {
+        setLiveAttempts((a) => a + 1);
+      }
+      state.lastShotEndT = t;
+      state.inAttempt = false;
+      state.apex = null;
+      state.crossedTop = false;
+      state.crossedBottom = false;
+    }
+    state.lastBall = ball;
+  }
 
   const [running, setRunning] = useState(false);
   const [status, setStatus] = useState("idle");
@@ -233,6 +334,53 @@ export default function PoseCanvas({
         ctx.globalAlpha = 1;
       });
 
+      // Draw hoop ROI (cyan rectangle) — only basketball, when placed
+      const hoop = hoopRoiRef.current;
+      if (hoop) {
+        ctx.save();
+        ctx.strokeStyle = "#00e5ff";
+        ctx.lineWidth = 3;
+        ctx.shadowColor = "#00e5ff";
+        ctx.shadowBlur = 12;
+        ctx.setLineDash([8, 6]);
+        ctx.strokeRect(hoop.x * w, hoop.y * h, hoop.w * w, hoop.h * h);
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "#00e5ff";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        ctx.fillText("HOOP", hoop.x * w + 4, hoop.y * h + 4);
+        ctx.restore();
+      }
+
+      // Draw ball trail (fading orange dots) + current ball position (filled circle)
+      const trail = ballTrailRef.current;
+      if (trail.length > 0) {
+        for (let i = 0; i < trail.length; i++) {
+          const p = trail[i];
+          const alpha = (i + 1) / trail.length;
+          ctx.fillStyle = `rgba(255, 165, 0, ${alpha * 0.6})`;
+          ctx.beginPath();
+          ctx.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      const ball = lastBallRef.current;
+      if (ball) {
+        ctx.save();
+        ctx.fillStyle = "#ff8c00";
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.shadowColor = "#ff8c00";
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(ball.x * w, ball.y * h, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
       // Tracking-lost detection
       if (targetAnchorRef.current && targetIdx === -1) {
         if (
@@ -318,10 +466,24 @@ export default function PoseCanvas({
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
+    ballFramesRef.current = [];
+    ballTrailRef.current = [];
+    lastBallRef.current = null;
+    liveShotStateRef.current = {
+      inAttempt: false,
+      apex: null,
+      crossedTop: false,
+      crossedBottom: false,
+      lastShotEndT: -Infinity,
+    };
     setHasTarget(false);
     setTrackingLost(false);
     setPersonCount(0);
-  }, [videoSrc, mode]);
+    setHoopRoi(null);
+    setPlacementStep("athlete");
+    setLiveMakes(0);
+    setLiveAttempts(0);
+  }, [videoSrc, mode, sport]);
 
   /* ---------------- Pose model + camera setup ---------------- */
   useEffect(() => {
@@ -332,6 +494,15 @@ export default function PoseCanvas({
         const landmarker = await loadPoseLandmarker();
         if (cancelled) return;
         landmarkerRef.current = landmarker;
+        // Load ball detector lazily for basketball only — fail soft if it errors
+        if (sport === "basketball") {
+          try {
+            const det = await loadBallDetector();
+            if (!cancelled) ballDetectorRef.current = det;
+          } catch (e) {
+            console.warn("[PoseCanvas] ball detector failed to load — make/miss tracking disabled", e);
+          }
+        }
 
         const video = videoRef.current;
         if (mode === "live") {
@@ -491,6 +662,50 @@ export default function PoseCanvas({
                 result = lm.detectForVideo(v, performance.now());
               }
               drawResults(result);
+
+              // Basketball: run object detection on every other frame for perf
+              const ballDet = ballDetectorRef.current;
+              if (sport === "basketball" && ballDet) {
+                ballDetectFrameSkipRef.current = (ballDetectFrameSkipRef.current + 1) % 2;
+                if (ballDetectFrameSkipRef.current === 0) {
+                  try {
+                    const detRes = ballDet.detectForVideo(v, performance.now());
+                    const dets = detRes?.detections || [];
+                    let ball = null;
+                    let bestScore = 0;
+                    for (const d of dets) {
+                      const cat = d.categories?.[0];
+                      const score = cat?.score || 0;
+                      if (cat?.categoryName === "sports ball" && score > bestScore) {
+                        const bb = d.boundingBox;
+                        if (bb) {
+                          const cx = (bb.originX + bb.width / 2) / v.videoWidth;
+                          const cy = (bb.originY + bb.height / 2) / v.videoHeight;
+                          ball = { x: cx, y: cy, conf: score };
+                          bestScore = score;
+                        }
+                      }
+                    }
+                    lastBallRef.current = ball;
+                    // Maintain trail (last 30 positions for live render)
+                    if (ball) {
+                      ballTrailRef.current.push({ ...ball, t: performance.now() / 1000 });
+                      if (ballTrailRef.current.length > 30) ballTrailRef.current.shift();
+                    }
+                    // Record ball during capture
+                    if (runningRef.current && startedAtRef.current != null) {
+                      const t = (Date.now() - startedAtRef.current) / 1000;
+                      ballFramesRef.current.push(ball ? { t, ...ball } : { t, x: null, y: null, conf: 0 });
+                      // Live make/miss detection while recording
+                      if (ball && hoopRoiRef.current) {
+                        evaluateLiveShot(t, ball);
+                      }
+                    }
+                  } catch (be) {
+                    console.warn("[PoseCanvas] ball detect error", be);
+                  }
+                }
+              }
             } catch (err) {
               // Log loudly so iOS Safari / WebGL issues surface in remote
               // console viewers and aren't swallowed. Also tag the message so
@@ -596,7 +811,7 @@ export default function PoseCanvas({
     panningRef.current = null;
   };
 
-  /* ---------------- Subject selection click handler ---------------- */
+  /* ---------------- Subject / hoop selection click handler ---------------- */
   const handleCanvasClick = (e) => {
     if (running) return;
     const canvas = canvasRef.current;
@@ -613,6 +828,22 @@ export default function PoseCanvas({
       nx = pan.x + (1 - wx) / zoom;
     }
     const click = { x: nx, y: ny };
+
+    // Step 2 (basketball only): place hoop ROI centered on click
+    if (placementStep === "hoop") {
+      const w = 0.12;
+      const h = 0.08;
+      setHoopRoi({
+        x: Math.max(0, Math.min(1 - w, click.x - w / 2)),
+        y: Math.max(0, Math.min(1 - h, click.y - h / 2)),
+        w,
+        h,
+      });
+      setPlacementStep("ready");
+      return;
+    }
+
+    // Step 1: pick athlete by tap-nearest pose
     const poses = lastPosesRef.current;
     if (!poses.length) return;
     let bestIdx = -1;
@@ -636,6 +867,8 @@ export default function PoseCanvas({
         lastSeenAtRef.current = Date.now();
         setHasTarget(true);
         setTrackingLost(false);
+        // Basketball: prompt the user to place the hoop next
+        setPlacementStep(sport === "basketball" ? "hoop" : "ready");
       }
     }
   };
@@ -646,6 +879,14 @@ export default function PoseCanvas({
     lastSeenAtRef.current = null;
     setHasTarget(false);
     setTrackingLost(false);
+    setPlacementStep("athlete");
+    setHoopRoi(null);
+  };
+
+  const clearHoop = () => {
+    if (running) return;
+    setHoopRoi(null);
+    setPlacementStep("hoop");
   };
 
   // Suppress click after a pan-drag so dragging doesn't accidentally lock onto someone
@@ -665,6 +906,17 @@ export default function PoseCanvas({
     framesRef.current = [];
     thumbsRef.current = [];
     lastThumbAtRef.current = 0;
+    ballFramesRef.current = [];
+    ballTrailRef.current = [];
+    setLiveMakes(0);
+    setLiveAttempts(0);
+    liveShotStateRef.current = {
+      inAttempt: false,
+      apex: null,
+      crossedTop: false,
+      crossedBottom: false,
+      lastShotEndT: -Infinity,
+    };
     startedAtRef.current = Date.now();
     runningRef.current = true;
     setRunning(true);
@@ -779,9 +1031,13 @@ export default function PoseCanvas({
     const detected = frames.filter((f) => f.lm).length;
     const duration_s =
       frames.length > 1 ? frames[frames.length - 1].t - frames[0].t : 0;
+    const ballFrames = ballFramesRef.current.filter((b) => b && b.x != null);
     let analysis;
     try {
-      analysis = analyzeSession(frames, sport);
+      analysis = analyzeSession(frames, sport, {
+        ballFrames: ballFrames.length ? ballFrames : null,
+        hoopRoi: hoopRoiRef.current,
+      });
     } catch (e) {
       console.error("rep analysis failed:", e);
       analysis = { sport, rep_count: 0, reps: [], no_reps_detected: true };
@@ -901,19 +1157,55 @@ export default function PoseCanvas({
           </div>
         )}
 
-        {/* tap-to-select instructions overlay */}
-        {!hasTarget && status === "ready" && !error && (
+        {/* tap-to-select / tap-to-place-hoop instructions overlay */}
+        {!running && status === "ready" && !error && placementStep !== "ready" && (
           <div
             data-testid="tap-to-select-banner"
             className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ff3b30]/50 px-5 py-3 text-center pointer-events-none"
           >
             <Target className="w-5 h-5 text-[#ff3b30] mx-auto" />
             <div className="mt-1 text-[11px] uppercase tracking-widest font-display font-bold text-white">
-              {personCount === 0
-                ? "Position the athlete in frame"
-                : `Tap the athlete to track (${personCount} detected)`}
+              {placementStep === "athlete"
+                ? personCount === 0
+                  ? "Position the athlete in frame"
+                  : `Step 1 / ${sport === "basketball" ? "2" : "1"} · Tap the athlete (${personCount} detected)`
+                : "Step 2 / 2 · Tap the rim to place the hoop"}
             </div>
           </div>
+        )}
+
+        {/* Live makes / attempts counter (basketball, while recording) */}
+        {sport === "basketball" && running && hoopRoi && (
+          <div
+            data-testid="live-shot-counter"
+            className="absolute top-3 right-3 flex items-center gap-2 bg-black/85 backdrop-blur border border-[#00e5ff]/50 px-3 py-1.5 pointer-events-none"
+          >
+            <span className="text-[10px] font-display uppercase tracking-widest text-[#00e5ff]">Shots</span>
+            <span className="text-sm font-bold font-mono text-white">
+              {liveMakes}<span className="text-zinc-500">/</span>{liveAttempts}
+            </span>
+            <span className="text-[10px] font-mono text-zinc-400">
+              {liveAttempts ? `${Math.round((liveMakes / liveAttempts) * 100)}%` : "—"}
+            </span>
+          </div>
+        )}
+
+        {/* Hoop reposition button (basketball, after placement, before recording) */}
+        {sport === "basketball" && hoopRoi && !running && (
+          <button
+            type="button"
+            data-testid="hoop-reposition-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              clearHoop();
+            }}
+            className="absolute top-3 right-3 inline-flex items-center gap-2 bg-[#00e5ff]/15 hover:bg-[#00e5ff]/25 border border-[#00e5ff]/50 px-3 py-1.5 transition-colors"
+            title="Move the hoop"
+          >
+            <span className="text-[11px] font-display uppercase tracking-widest font-bold text-[#00e5ff]">
+              Hoop · Reposition
+            </span>
+          </button>
         )}
 
         {/* tracking-lost warning */}
@@ -939,7 +1231,9 @@ export default function PoseCanvas({
               setTimeout(() => setSwitching(false), 800);
             }}
             disabled={running || switching}
-            className="absolute top-3 right-3 inline-flex items-center gap-2 bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 px-3 py-1.5 transition-colors"
+            className={`absolute right-3 inline-flex items-center gap-2 bg-black/70 backdrop-blur hover:bg-black/90 disabled:opacity-40 disabled:cursor-not-allowed border border-white/10 px-3 py-1.5 transition-colors ${
+              sport === "basketball" ? "top-14" : "top-3"
+            }`}
             title={
               running
                 ? "Stop recording before switching cameras"
