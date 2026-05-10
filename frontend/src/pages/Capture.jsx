@@ -4,6 +4,7 @@ import { api, errMsg } from "@/lib/api";
 import SportPicker from "@/components/SportPicker";
 import PoseCanvas from "@/components/PoseCanvas";
 import MultiPlayerPoseCanvas from "@/components/MultiPlayerPoseCanvas";
+import CameraGuide from "@/components/CameraGuide";
 import TrimSlider from "@/components/TrimSlider";
 import { Upload, Camera, Loader2, ArrowRight, User } from "lucide-react";
 import { toast } from "sonner";
@@ -351,6 +352,9 @@ export default function Capture() {
                   Capture & analyze
                 </h2>
               </div>
+
+              {/* Camera setup guide — sport- and mode-specific */}
+              <CameraGuide sport={sport} mode={mode} />
 
               {/* Session context / notes — optional but improves AI analysis.
                   Helps the coach explain *what* the athlete is working on so

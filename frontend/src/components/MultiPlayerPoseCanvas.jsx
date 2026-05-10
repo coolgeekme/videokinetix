@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Target, AlertTriangle, X, Play, Pause } from "lucide-react";
 import { loadPoseLandmarker } from "../lib/mediapipeLoader";
 import { analyzeSession } from "../lib/repDetection";
+import { assessFrameQuality } from "../lib/frameQuality";
 
 // Up to 4 players — each gets a distinct color for the skeleton + UI.
 // Matches the colors used in the slot pills.
@@ -54,6 +55,8 @@ export default function MultiPlayerPoseCanvas({
   const [error, setError] = useState(null);
   const [personCount, setPersonCount] = useState(0);
   const [videoPaused, setVideoPaused] = useState(true);
+  const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
+  const lastQualityUpdateRef = useRef(0);
 
   /* ---------- init ---------- */
   useEffect(() => {
@@ -151,6 +154,12 @@ export default function MultiPlayerPoseCanvas({
         const poses = result?.landmarks || [];
         lastPosesRef.current = poses;
         setPersonCount(poses.length);
+        // Throttled frame-quality check
+        const nowQ = performance.now();
+        if (nowQ - lastQualityUpdateRef.current > 500) {
+          lastQualityUpdateRef.current = nowQ;
+          setFrameQuality(assessFrameQuality(poses, { sport }));
+        }
         // Match each detected pose to nearest player anchor (Hungarian-light)
         matchPosesToPlayers(poses);
         // If running, record per-player frames
@@ -461,6 +470,43 @@ export default function MultiPlayerPoseCanvas({
               `Ready · ${personCount} detected`}
           </span>
         </div>
+
+        {/* Frame quality pill */}
+        {status === "ready" && personCount > 0 && (
+          <div
+            data-testid="frame-quality-pill"
+            className={`absolute top-11 left-3 flex items-center gap-1.5 backdrop-blur px-2.5 py-1 border pointer-events-none transition-colors ${
+              frameQuality.level === "good"
+                ? "bg-[#00ff88]/15 border-[#00ff88]/50"
+                : frameQuality.level === "fair"
+                ? "bg-[#ffab00]/15 border-[#ffab00]/50"
+                : "bg-[#ff3b30]/15 border-[#ff3b30]/50"
+            }`}
+          >
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                frameQuality.level === "good"
+                  ? "bg-[#00ff88]"
+                  : frameQuality.level === "fair"
+                  ? "bg-[#ffab00]"
+                  : "bg-[#ff3b30]"
+              }`}
+            />
+            <span
+              className={`text-[10px] uppercase tracking-widest font-display font-bold ${
+                frameQuality.level === "good"
+                  ? "text-[#00ff88]"
+                  : frameQuality.level === "fair"
+                  ? "text-[#ffab00]"
+                  : "text-[#ff3b30]"
+              }`}
+            >
+              {frameQuality.level === "good"
+                ? "Frame: good"
+                : frameQuality.issues[0] || `Frame: ${frameQuality.level}`}
+            </span>
+          </div>
+        )}
 
         {/* Tap-to-pick instructions */}
         {!running && status === "ready" && !error && playerCount < maxPlayers && (

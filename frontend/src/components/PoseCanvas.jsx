@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
+import { assessFrameQuality } from "../lib/frameQuality";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
@@ -124,6 +125,8 @@ export default function PoseCanvas({
   const [hasTarget, setHasTarget] = useState(false);
   const [trackingLost, setTrackingLost] = useState(false);
   const [personCount, setPersonCount] = useState(0);
+  const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
+  const lastQualityUpdateRef = useRef(0);
 
   // Basketball: ball trajectory + hoop ROI for make/miss detection
   const ballDetectorRef = useRef(null);
@@ -343,6 +346,14 @@ export default function PoseCanvas({
       const poses = result?.landmarks || [];
       lastPosesRef.current = poses;
       setPersonCount(poses.length);
+
+      // Frame quality (throttled to 500ms) — gives users live feedback on
+      // whether their camera setup is producing analyzable footage.
+      const nowQ = performance.now();
+      if (nowQ - lastQualityUpdateRef.current > 500) {
+        lastQualityUpdateRef.current = nowQ;
+        setFrameQuality(assessFrameQuality(poses, { sport }));
+      }
 
       // Identify which detected pose is "the target" via nearest-neighbour tracking
       let targetIdx = -1;
@@ -1468,6 +1479,45 @@ export default function PoseCanvas({
                     : "Idle"}
           </span>
         </div>
+
+        {/* Frame quality pill (top-left, second row). Live green/yellow/red
+            feedback so the user can self-correct camera framing in real time.
+            Hidden when loading. */}
+        {status === "ready" && personCount > 0 && (
+          <div
+            data-testid="frame-quality-pill"
+            className={`absolute top-12 left-3 flex items-center gap-2 backdrop-blur px-3 py-1.5 border pointer-events-none transition-colors ${
+              frameQuality.level === "good"
+                ? "bg-[#00ff88]/15 border-[#00ff88]/50"
+                : frameQuality.level === "fair"
+                ? "bg-[#ffab00]/15 border-[#ffab00]/50"
+                : "bg-[#ff3b30]/15 border-[#ff3b30]/50"
+            }`}
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                frameQuality.level === "good"
+                  ? "bg-[#00ff88]"
+                  : frameQuality.level === "fair"
+                  ? "bg-[#ffab00]"
+                  : "bg-[#ff3b30]"
+              }`}
+            />
+            <span
+              className={`text-[10px] font-display uppercase tracking-widest font-bold ${
+                frameQuality.level === "good"
+                  ? "text-[#00ff88]"
+                  : frameQuality.level === "fair"
+                  ? "text-[#ffab00]"
+                  : "text-[#ff3b30]"
+              }`}
+            >
+              {frameQuality.level === "good"
+                ? "Frame: good"
+                : frameQuality.issues[0] || `Frame: ${frameQuality.level}`}
+            </span>
+          </div>
+        )}
 
         {/* tracking pill (top-center) */}
         {hasTarget && !running && (
