@@ -17,6 +17,67 @@
     --border: #27272a;
 }
 
+/* Light theme — same accent palette, inverted surfaces.
+   We can't realistically rewrite every hard-coded Tailwind class, so we
+   override the most-used surface/text hex utility classes here. Accent
+   colors (#ff3b30 / #00ff88 / #00e5ff / #ffd166) stay the same; they read
+   well on light surfaces too. */
+html.light {
+    --bg: #f5f5f7;
+    --surface: #ffffff;
+    --surface-2: #f0f0f3;
+    --text: #0a0a0a;
+    --text-muted: #4b5563;
+    --text-faint: #9ca3af;
+    --border: #e5e7eb;
+}
+html.light body,
+html.light #root {
+    background: var(--bg) !important;
+    color: var(--text);
+}
+/* Dark hex surface classes → light surfaces */
+html.light .bg-black { background-color: var(--bg) !important; }
+html.light .bg-\[\#0a0a0a\] { background-color: var(--bg) !important; }
+html.light .bg-\[\#0f0f0f\] { background-color: var(--surface) !important; }
+html.light .bg-\[\#121212\] { background-color: var(--surface) !important; }
+html.light .bg-\[\#141414\] { background-color: var(--surface-2) !important; }
+html.light .bg-\[\#1a1a1a\] { background-color: var(--surface-2) !important; }
+html.light .bg-zinc-800 { background-color: #e5e7eb !important; }
+html.light .bg-zinc-900 { background-color: var(--surface-2) !important; }
+html.light .bg-zinc-950 { background-color: var(--bg) !important; }
+html.light .hover\:bg-zinc-700:hover { background-color: #d4d4d8 !important; }
+html.light .hover\:bg-zinc-800:hover { background-color: #d4d4d8 !important; }
+html.light .hover\:bg-zinc-900:hover { background-color: var(--surface-2) !important; }
+html.light .bg-white\/5 { background-color: rgba(0,0,0,0.04) !important; }
+html.light .bg-white\/10 { background-color: rgba(0,0,0,0.08) !important; }
+html.light .bg-black\/40 { background-color: rgba(0,0,0,0.04) !important; }
+html.light .bg-black\/70 { background-color: rgba(255,255,255,0.85) !important; }
+html.light .bg-black\/80 { background-color: rgba(255,255,255,0.9) !important; }
+html.light .bg-black\/85 { background-color: rgba(255,255,255,0.92) !important; }
+/* Text colors — flip whites to dark slate */
+html.light .text-white { color: var(--text) !important; }
+html.light .text-zinc-100 { color: var(--text) !important; }
+html.light .text-zinc-200 { color: #1f2937 !important; }
+html.light .text-zinc-300 { color: #374151 !important; }
+html.light .text-zinc-400 { color: var(--text-muted) !important; }
+html.light .text-zinc-500 { color: #6b7280 !important; }
+html.light .text-zinc-600 { color: #9ca3af !important; }
+/* Borders — flip whites to neutral gray */
+html.light .border-white\/5 { border-color: rgba(0,0,0,0.06) !important; }
+html.light .border-white\/10 { border-color: var(--border) !important; }
+html.light .border-white\/15 { border-color: #d1d5db !important; }
+html.light .border-white\/20 { border-color: #d1d5db !important; }
+html.light .border-white\/30 { border-color: #9ca3af !important; }
+html.light .border-zinc-700 { border-color: #d4d4d8 !important; }
+html.light .border-zinc-800 { border-color: var(--border) !important; }
+/* Divides */
+html.light .divide-white\/5 > * + * { border-color: rgba(0,0,0,0.06) !important; }
+html.light .divide-white\/10 > * + * { border-color: var(--border) !important; }
+/* Gradient overlays — soften */
+html.light .from-black { --tw-gradient-from: rgba(255,255,255,0.95) !important; }
+html.light .via-black\/50 { --tw-gradient-via: rgba(255,255,255,0.5) !important; }
+
 html,
 body,
 #root {

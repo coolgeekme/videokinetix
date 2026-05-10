@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { ArrowRight, Activity, Brain, Target, Trophy, Camera, ChartLine } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
 
 const HERO_IMG =
   "https://images.unsplash.com/photo-1776935889501-68e5607fa42a?crop=entropy&cs=srgb&fm=jpg&ixid=M3w3NDQ2MzR8MHwxfHNlYXJjaHwzfHxhdGhsZXRlJTIwcnVubmluZyUyMGRhcmt8ZW58MHx8fHwxNzc4MTUzODc5fDA&ixlib=rb-4.1.0&q=85";
@@ -41,6 +42,7 @@ export default function Landing() {
             <a href="#features" className="text-zinc-400 hover:text-white font-display uppercase tracking-wide" data-testid="nav-features">Features</a>
           </nav>
           <div className="flex items-center gap-3">
+            <ThemeToggle />
             <Link to="/login" data-testid="login-link" className="text-sm text-zinc-300 hover:text-white font-display uppercase tracking-wide">
               Sign in
             </Link>

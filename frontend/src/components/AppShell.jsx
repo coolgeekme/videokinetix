@@ -1,6 +1,7 @@
 import { Link, NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { LayoutDashboard, Camera, ListChecks, Target, LogOut, Activity, Users } from "lucide-react";
+import ThemeToggle from "@/components/ThemeToggle";
 
 const NAV = [
   { to: "/app/dashboard", label: "Dashboard", icon: LayoutDashboard, testid: "nav-dashboard" },
@@ -58,6 +59,7 @@ export default function AppShell() {
           </nav>
 
           <div className="flex items-center gap-3">
+            <ThemeToggle />
             <span className="hidden sm:block text-sm text-zinc-400" data-testid="user-name">
               {user?.name}
             </span>
