@@ -385,6 +385,8 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
     # pose_summary to avoid duplicate storage.
     shot_outcomes = pose_summary_clean.pop("shot_outcomes", None)
     makes_vs_misses = pose_summary_clean.pop("makes_vs_misses", None)
+    # Hoist pickleball aggregates similarly
+    pickleball_stats = pose_summary_clean.pop("pickleball_stats", None)
 
     session_id = str(uuid.uuid4())
     doc = {
@@ -401,6 +403,7 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
         "consistency": pose_summary_clean.get("consistency"),
         "shot_outcomes": shot_outcomes,
         "makes_vs_misses": makes_vs_misses,
+        "pickleball_stats": pickleball_stats,
         "notes": req.notes,
         "analysis": analysis,
         "form_score": int(analysis.get("form_score", 70)),

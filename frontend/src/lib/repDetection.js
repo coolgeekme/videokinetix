@@ -17,35 +17,11 @@
  */
 
 import { detectShots, annotateRepsWithOutcomes, makesVsMissesStats } from "./shotDetection";
+import { L, angle } from "./repDetectionConstants";
+import { classifyStroke, contactPointMetrics, readyPositionStats, strokeBreakdown } from "./pickleballAnalysis";
 
-// MediaPipe BlazePose 33 landmark indices
-const L = {
-  NOSE: 0,
-  LEFT_SHOULDER: 11,
-  RIGHT_SHOULDER: 12,
-  LEFT_ELBOW: 13,
-  RIGHT_ELBOW: 14,
-  LEFT_WRIST: 15,
-  RIGHT_WRIST: 16,
-  LEFT_HIP: 23,
-  RIGHT_HIP: 24,
-  LEFT_KNEE: 25,
-  RIGHT_KNEE: 26,
-  LEFT_ANKLE: 27,
-  RIGHT_ANKLE: 28,
-};
-
-function angle(a, b, c) {
-  if (!a || !b || !c) return null;
-  const ab = { x: a.x - b.x, y: a.y - b.y };
-  const cb = { x: c.x - b.x, y: c.y - b.y };
-  const dot = ab.x * cb.x + ab.y * cb.y;
-  const magAB = Math.hypot(ab.x, ab.y);
-  const magCB = Math.hypot(cb.x, cb.y);
-  if (magAB === 0 || magCB === 0) return null;
-  const cos = Math.min(1, Math.max(-1, dot / (magAB * magCB)));
-  return (Math.acos(cos) * 180) / Math.PI;
-}
+// (kept for backward-compat — re-export same constants/helpers used below)
+// MediaPipe BlazePose 33 landmark indices — see repDetectionConstants.js
 
 function smooth(signal, windowSize = 5) {
   if (signal.length < windowSize) return signal.slice();
@@ -227,10 +203,9 @@ const SPORTS = {
         dx(lm[L.RIGHT_WRIST], prev[L.RIGHT_WRIST])
       );
     },
-    minRepIntervalSec: 0.9,
-    minProminence: 0.015,
+    minRepIntervalSec: 0.6, // dinks come fast
+    minProminence: 0.012,
     apex: (lm) => {
-      // Pick the more-extended arm (assume that's the swing arm)
       const lExt = angle(lm[L.LEFT_SHOULDER], lm[L.LEFT_ELBOW], lm[L.LEFT_WRIST]) ?? 0;
       const rExt = angle(lm[L.RIGHT_SHOULDER], lm[L.RIGHT_ELBOW], lm[L.RIGHT_WRIST]) ?? 0;
       const isLeft = lExt > rExt;
@@ -240,14 +215,18 @@ const SPORTS = {
       const hip = isLeft ? lm[L.LEFT_HIP] : lm[L.RIGHT_HIP];
       const knee = isLeft ? lm[L.LEFT_KNEE] : lm[L.RIGHT_KNEE];
       const ankle = isLeft ? lm[L.LEFT_ANKLE] : lm[L.RIGHT_ANKLE];
-      return {
+      const baseMetrics = {
         swing_arm_extension: angle(shoulder, elbow, wrist),
         knee_flexion_at_contact: angle(hip, knee, ankle),
       };
+      // Merge in detailed contact-point metrics from the pickleball module
+      const contactMetrics = contactPointMetrics({ lm });
+      return { ...baseMetrics, ...contactMetrics };
     },
     targets: {
       swing_arm_extension: [120, 165, 25],
-      knee_flexion_at_contact: [130, 165, 25], // some knee bend = ready/athletic
+      knee_flexion_at_contact: [130, 165, 25],
+      arm_extension_deg: [120, 170, 30],
     },
     cues: {
       swing_arm_extension: { low: "Compact swing — extend through contact.", high: "Don't lock the arm; keep a slight bend." },
@@ -349,7 +328,7 @@ export function analyzeSession(frames, sport, options = {}) {
       }
     }
     const repScore = count ? Math.round(total / count) : null;
-    return {
+    const baseRep = {
       index: i + 1,
       time_s: +f.t.toFixed(2),
       frame_index: p.index,
@@ -357,6 +336,18 @@ export function analyzeSession(frames, sport, options = {}) {
       sub_scores: scores,
       score: repScore,
     };
+    // Pickleball-specific: classify stroke type based on contact frame +
+    // ~6-frame pre-contact window (200ms back-swing).
+    if (sport === "pickleball") {
+      const back = Math.max(0, p.index - 6);
+      const prevWindow = frames.slice(back, p.index);
+      baseRep.stroke_type = classifyStroke({
+        contactFrame: f,
+        prevFrames: prevWindow,
+        isFirstStroke: i === 0,
+      });
+    }
+    return baseRep;
   });
 
   // Aggregate
@@ -425,6 +416,15 @@ export function analyzeSession(frames, sport, options = {}) {
     makes_vs_misses = makesVsMissesStats(annotatedReps);
   }
 
+  // Pickleball-specific: stroke breakdown + ready-position scoring
+  let pickleball_stats = null;
+  if (sport === "pickleball" && reps.length > 0) {
+    pickleball_stats = {
+      stroke_breakdown: strokeBreakdown(reps),
+      ready_position: readyPositionStats(frames, reps),
+    };
+  }
+
   return {
     sport,
     rep_count: annotatedReps.length,
@@ -440,6 +440,7 @@ export function analyzeSession(frames, sport, options = {}) {
     no_reps_detected: annotatedReps.length === 0,
     shot_outcomes,
     makes_vs_misses,
+    pickleball_stats,
   };
 }
 

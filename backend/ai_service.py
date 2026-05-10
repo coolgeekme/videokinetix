@@ -31,9 +31,9 @@ SPORT_CONTEXT = {
         "rep_unit": "stroke",
     },
     "pickleball": {
-        "key_metrics": "paddle face, shoulder turn, knee bend, weight transfer, split step timing",
-        "elite_benchmark": "Ben Johns / Anna Leigh Waters mechanics: continental grip, compact backswing, low ready position (knee 130-150°).",
-        "rep_unit": "swing",
+        "key_metrics": "stroke type (dink/drive/drop/volley/overhead/serve), contact height & zone, paddle path, body rotation, knee bend, ready position between shots, footwork",
+        "elite_benchmark": "Ben Johns / Anna Leigh Waters: paddle held high & forward in ready position, contact at or above net height for dinks, full torso rotation on drives, compact swing with relaxed grip.",
+        "rep_unit": "stroke",
     },
 }
 
@@ -140,13 +140,34 @@ SHOT OUTCOMES (from ball-tracking + hoop ROI):
             outcome_block += json.dumps(makes_vs_misses, indent=2)
             outcome_block += "\nIDENTIFY the 1-2 measurements with the largest absolute delta — these are the form factors most correlated with missed shots."
 
+    # Pickleball-specific block: stroke breakdown + ready-position
+    pickleball_block = ""
+    pickleball_stats = pose_summary.get("pickleball_stats")
+    if sport == "pickleball" and pickleball_stats:
+        sb = pickleball_stats.get("stroke_breakdown") or {}
+        rp = pickleball_stats.get("ready_position") or {}
+        pickleball_block = f"""
+
+STROKE BREAKDOWN (auto-classified from wrist trajectory + contact height):
+{json.dumps(sb, indent=2)}
+
+READY-POSITION ANALYSIS (between-stroke posture):
+{json.dumps(rp, indent=2) if rp else "  Insufficient inter-stroke data."}
+
+Pickleball-specific guidance for your analysis:
+- Each rep has a `stroke_type` (dink, drop, drive, volley, overhead, serve). Reference these in your improvements.
+- A `contact_zone` of "below_knee" or "above_head" is usually a positioning issue, not a swing-mechanics issue — call this out.
+- `ready_score` < 70 is a major coaching opportunity — paddle drops between shots cost rallies. If `paddle_up_pct` is below 60, that's the biggest single fix.
+- For DINKS, ideal contact is at "waist" zone with `body_rotation_score` > 15. For DRIVES, "chest" zone with strong torso turn.
+- For each stroke type with ≥2 reps, give one specific cue."""
+
     prompt = f"""Analyse this {sport} performance using the per-rep kinematic data.
 
 KEY METRICS FOR {sport.upper()}: {ctx['key_metrics']}
 ELITE BENCHMARK: {ctx['elite_benchmark']}{context_block}
 
 SESSION DATA (each rep is one {ctx['rep_unit']}; angles are degrees, all measurements at the rep apex):
-{json.dumps(_compact_for_prompt(pose_summary), indent=2)}{outcome_block}
+{json.dumps(_compact_for_prompt(pose_summary), indent=2)}{outcome_block}{pickleball_block}
 
 Notes for your analysis:
 - The local rep score (0-100) measures how each rep matched target biomechanical bands.
@@ -207,6 +228,18 @@ async def generate_training_plan(sport: str, analysis: dict, athlete_level: str 
             f"\n\nATHLETE SESSION CONTEXT: \"{notes_clean[:500]}\"\n"
             "Build the plan to advance THIS specific drill/focus over the week."
         )
+    # Pickleball: pull stroke breakdown so the plan targets the weakest stroke type
+    pb_hint = ""
+    pickleball_stats = analysis.get("pickleball_stats") if isinstance(analysis, dict) else None
+    if sport == "pickleball" and pickleball_stats:
+        sb = pickleball_stats.get("stroke_breakdown") or {}
+        rp = pickleball_stats.get("ready_position") or {}
+        pb_hint = (
+            f"\n\nPICKLEBALL STROKE BREAKDOWN: {json.dumps(sb)}"
+            f"\nREADY-POSITION SCORE: {rp.get('ready_score') if rp else 'n/a'} (paddle_up_pct={rp.get('paddle_up_pct') if rp else 'n/a'}, knee_bend_avg={rp.get('knee_bend_avg') if rp else 'n/a'})"
+            "\nAt least 2 of the 7 days MUST target the lowest-avg-score stroke type. "
+            "If ready_score is below 70, at least 1 day MUST be a dedicated 'paddle position + split step' drill."
+        )
     outcome_hint = ""
     shot_outcomes = analysis.get("shot_outcomes") if isinstance(analysis, dict) else None
     makes_vs_misses = analysis.get("makes_vs_misses") if isinstance(analysis, dict) else None
@@ -225,7 +258,7 @@ async def generate_training_plan(sport: str, analysis: dict, athlete_level: str 
     prompt = f"""Design a 7-day personalized training plan for a {athlete_level} {sport} athlete based on their form analysis.
 
 FORM ANALYSIS:
-{json.dumps(analysis, indent=2)}{notes_hint}{outcome_hint}
+{json.dumps(analysis, indent=2)}{notes_hint}{outcome_hint}{pb_hint}
 
 Return ONLY this JSON (no extra text):
 {{

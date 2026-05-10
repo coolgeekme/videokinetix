@@ -210,10 +210,26 @@ export default function SessionDetail() {
                   const s = r.score ?? 0;
                   const color =
                     s >= 80 ? "#00ff88" : s >= 60 ? "#ffab00" : "#ff3b30";
+                  const strokeBadge =
+                    r.stroke_type
+                      ? r.stroke_type === "dink"
+                        ? "Di"
+                        : r.stroke_type === "drive"
+                        ? "Dr"
+                        : r.stroke_type === "drop"
+                        ? "Dp"
+                        : r.stroke_type === "volley"
+                        ? "V"
+                        : r.stroke_type === "overhead"
+                        ? "O"
+                        : r.stroke_type === "serve"
+                        ? "S"
+                        : null
+                      : null;
                   return (
                     <div
                       key={r.index}
-                      title={`Rep ${r.index}: ${s}${typeof r.made === "boolean" ? (r.made ? " · MAKE" : " · MISS") : ""}`}
+                      title={`Rep ${r.index}: ${s}${r.stroke_type ? ` · ${r.stroke_type}` : ""}${typeof r.made === "boolean" ? (r.made ? " · MAKE" : " · MISS") : ""}`}
                       className="flex-1 transition-opacity hover:opacity-80 relative"
                       style={{
                         height: `${Math.max(6, s)}%`,
@@ -227,6 +243,13 @@ export default function SessionDetail() {
                           style={{ color: r.made ? "#00ff88" : "#ff3b30" }}
                         >
                           {r.made ? "✓" : "✗"}
+                        </span>
+                      )}
+                      {strokeBadge && (
+                        <span
+                          className="absolute -top-3 left-1/2 -translate-x-1/2 text-[8px] font-bold text-white/70"
+                        >
+                          {strokeBadge}
                         </span>
                       )}
                     </div>
@@ -245,6 +268,86 @@ export default function SessionDetail() {
               <p className="text-sm text-zinc-300 leading-relaxed italic">
                 &ldquo;{session.notes}&rdquo;
               </p>
+            </div>
+          )}
+
+          {/* Pickleball: Stroke breakdown + ready-position card */}
+          {session.sport === "pickleball" && session.pickleball_stats && (
+            <div className="mt-6 border-t border-white/10 pt-4 space-y-4" data-testid="pickleball-stats">
+              {session.pickleball_stats.stroke_breakdown && Object.keys(session.pickleball_stats.stroke_breakdown).length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-widest text-[#00e5ff] font-display font-bold mb-2">
+                    Stroke breakdown
+                  </div>
+                  <div className="space-y-1.5">
+                    {Object.entries(session.pickleball_stats.stroke_breakdown).map(([type, data]) => (
+                      <div key={type} className="flex items-center gap-3 text-sm" data-testid={`stroke-row-${type}`}>
+                        <span className="font-display uppercase tracking-widest text-xs font-bold text-white w-20 flex-shrink-0">
+                          {type}
+                        </span>
+                        <span className="text-zinc-400 font-mono text-xs w-12 text-center">
+                          {data.count}×
+                        </span>
+                        <div className="flex-1 h-2 bg-white/5 relative overflow-hidden">
+                          <div
+                            className="absolute inset-y-0 left-0 transition-all"
+                            style={{
+                              width: `${data.avg_score}%`,
+                              background:
+                                data.avg_score >= 80
+                                  ? "#00ff88"
+                                  : data.avg_score >= 60
+                                  ? "#ffab00"
+                                  : "#ff3b30",
+                            }}
+                          />
+                        </div>
+                        <span className="text-xs font-mono text-white w-10 text-right">{data.avg_score}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {session.pickleball_stats.ready_position && (
+                <div className="border-t border-white/5 pt-3">
+                  <div className="text-[10px] uppercase tracking-widest text-[#00e5ff] font-display font-bold mb-2">
+                    Ready position · between shots
+                  </div>
+                  <div className="grid grid-cols-3 gap-3 text-center">
+                    <div>
+                      <div
+                        className="font-display font-black text-3xl"
+                        style={{
+                          color:
+                            session.pickleball_stats.ready_position.ready_score >= 80
+                              ? "#00ff88"
+                              : session.pickleball_stats.ready_position.ready_score >= 60
+                              ? "#ffab00"
+                              : "#ff3b30",
+                        }}
+                      >
+                        {session.pickleball_stats.ready_position.ready_score}
+                      </div>
+                      <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">Ready score</div>
+                    </div>
+                    <div>
+                      <div className="font-display font-black text-3xl text-white">
+                        {session.pickleball_stats.ready_position.paddle_up_pct}%
+                      </div>
+                      <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">Paddle up</div>
+                    </div>
+                    <div>
+                      <div className="font-display font-black text-3xl text-white">
+                        {session.pickleball_stats.ready_position.knee_bend_avg
+                          ? `${session.pickleball_stats.ready_position.knee_bend_avg}°`
+                          : "—"}
+                      </div>
+                      <div className="text-[9px] uppercase tracking-widest text-zinc-500 mt-1">Knee bend</div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
