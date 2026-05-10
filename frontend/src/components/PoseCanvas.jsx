@@ -929,8 +929,9 @@ export default function PoseCanvas({
             bestB = b;
           }
         }
-        // Generous radius for ball tap (balls are small on screen)
-        if (bestB && bestBd < 0.12 / zoom) {
+        // Generous radius for ball tap (balls are small on screen — phone
+        // taps land somewhere near the ball, not exactly on it).
+        if (bestB && bestBd < 0.2 / zoom) {
           ballAnchorRef.current = { x: bestB.x, y: bestB.y };
           setHasLockedBall(true);
           return;
@@ -984,6 +985,12 @@ export default function PoseCanvas({
     if (running) return;
     setHoopRoi(null);
     setPlacementStep("hoop");
+  };
+
+  const clearBallLock = () => {
+    if (running) return;
+    ballAnchorRef.current = null;
+    setHasLockedBall(false);
   };
 
   // Suppress click after a pan-drag so dragging doesn't accidentally lock onto someone
@@ -1256,6 +1263,11 @@ export default function PoseCanvas({
           </div>
         )}
 
+        {/* Ball-locked pill (basketball, after explicit pick, before recording).
+            Shows below the athlete pill so user can tap CHANGE to pick a
+            different ball. While recording, just shows non-interactive status. */}
+        {/* removed: unified into the ball-detector status pill below */}
+
         {/* tap-to-select / tap-to-place-hoop instructions overlay.
             Top-aligned + small so it doesn't cover the rim or athlete area
             on mobile portrait. */}
@@ -1292,28 +1304,33 @@ export default function PoseCanvas({
         )}
 
         {/* Ball-detector status pill (basketball, top-right under counter).
-            Tells the user *why* shots aren't being counted when ball detection
-            isn't picking up the basketball. */}
+            When a ball is locked AND we're not recording, the pill becomes
+            a button: tap to clear the lock so the user can pick a different
+            ball (e.g., when multiple balls are on the court). */}
         {sport === "basketball" && (
           <div
             data-testid="ball-detector-status"
-            className={`absolute right-3 flex items-center gap-1.5 backdrop-blur border px-2.5 py-1 pointer-events-none transition-colors ${
+            className={`absolute right-3 flex items-center gap-1.5 backdrop-blur border px-2.5 py-1 transition-colors ${
               running && hoopRoi ? "top-12" : "top-12"
             } ${
               ballDetectorState === "failed"
                 ? "bg-[#ff3b30]/15 border-[#ff3b30]/50"
-                : ballSeen
+                : hasLockedBall
                   ? "bg-[#ff8c00]/15 border-[#ff8c00]/60"
-                  : ballDetectorState === "ready"
-                    ? "bg-black/70 border-white/15"
-                    : "bg-black/70 border-white/10"
-            }`}
+                  : ballSeen
+                    ? "bg-[#ff8c00]/15 border-[#ff8c00]/60"
+                    : ballDetectorState === "ready"
+                      ? "bg-black/70 border-white/15"
+                      : "bg-black/70 border-white/10"
+            } ${hasLockedBall && !running ? "pointer-events-auto cursor-pointer hover:bg-[#ff8c00]/25" : "pointer-events-none"}`}
+            onClick={hasLockedBall && !running ? clearBallLock : undefined}
+            title={hasLockedBall && !running ? "Tap to pick a different ball" : undefined}
           >
             <span
               className={`w-1.5 h-1.5 rounded-full ${
                 ballDetectorState === "failed"
                   ? "bg-[#ff3b30]"
-                  : ballSeen
+                  : ballSeen || hasLockedBall
                     ? "bg-[#ff8c00] pulse-dot"
                     : ballDetectorState === "ready"
                       ? "bg-zinc-400"
@@ -1324,7 +1341,7 @@ export default function PoseCanvas({
               className={`text-[10px] font-display uppercase tracking-widest font-bold ${
                 ballDetectorState === "failed"
                   ? "text-[#ff3b30]"
-                  : ballSeen
+                  : ballSeen || hasLockedBall
                     ? "text-[#ff8c00]"
                     : "text-zinc-300"
               }`}
@@ -1333,7 +1350,7 @@ export default function PoseCanvas({
                 ? "Ball model failed"
                 : ballDetectorState === "loading"
                   ? "Loading ball model"
-                  : hasLockedBall && ballSeen
+                  : hasLockedBall
                     ? "Ball locked"
                     : ballCount > 1 && !running
                       ? `${ballCount} balls · tap to pick`
@@ -1341,6 +1358,14 @@ export default function PoseCanvas({
                         ? "Ball tracked"
                         : "Ball: searching"}
             </span>
+            {hasLockedBall && !running && (
+              <span
+                data-testid="clear-ball-lock-btn"
+                className="text-[9px] uppercase tracking-widest text-zinc-200 ml-1 underline-offset-2 underline"
+              >
+                change
+              </span>
+            )}
           </div>
         )}
 
