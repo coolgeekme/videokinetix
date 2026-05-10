@@ -236,6 +236,18 @@ export default function SessionDetail() {
             </div>
           )}
 
+          {/* Session notes (user-provided context for the AI analysis) */}
+          {session.notes && (
+            <div className="mt-6 border-t border-white/10 pt-4" data-testid="session-notes-card">
+              <div className="text-[10px] uppercase tracking-widest text-zinc-500 font-display font-bold mb-1.5">
+                Session context
+              </div>
+              <p className="text-sm text-zinc-300 leading-relaxed italic">
+                &ldquo;{session.notes}&rdquo;
+              </p>
+            </div>
+          )}
+
           {/* Basketball: Shooting stats card */}
           {session.sport === "basketball" && session.shot_outcomes && (
             <div className="mt-6 border-t border-white/10 pt-4" data-testid="shooting-stats">

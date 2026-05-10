@@ -7,6 +7,37 @@ import TrimSlider from "@/components/TrimSlider";
 import { Upload, Camera, Loader2, ArrowRight, User } from "lucide-react";
 import { toast } from "sonner";
 
+// Quick-add note chips per sport — saves typing on mobile and primes the
+// user to provide useful context (drill type, intentional form constraints).
+const SPORT_SUGGESTIONS = {
+  basketball: [
+    "Form shooting · no jump",
+    "Catch-and-shoot",
+    "Pull-up jumper",
+    "Free throws",
+    "Off-the-dribble",
+  ],
+  pickleball: [
+    "Third-shot drop",
+    "Dink rally",
+    "Drive return",
+    "Overhead smash",
+    "Serve technique",
+  ],
+  soccer: [
+    "Instep finish",
+    "Curling free kick",
+    "Volley practice",
+    "Header technique",
+  ],
+  swimming: [
+    "Freestyle catch",
+    "Streamline kick",
+    "Bilateral breathing",
+    "Sprint set",
+  ],
+};
+
 export default function Capture() {
   const [params] = useSearchParams();
   const [athletes, setAthletes] = useState([]);
@@ -15,6 +46,7 @@ export default function Capture() {
   const [sport, setSport] = useState(params.get("sport") || null);
   const [mode, setMode] = useState("live");
   const [videoSrc, setVideoSrc] = useState(null);
+  const [notes, setNotes] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
   const [trim, setTrim] = useState([0, 0]);
@@ -81,6 +113,7 @@ export default function Capture() {
         mode,
         duration_seconds: summary.duration_seconds,
         pose_summary: summary,
+        notes: notes.trim() || null,
       });
       toast.success("Analysis complete");
       nav(`/app/sessions/${data.id}`);
@@ -253,6 +286,62 @@ export default function Capture() {
                 <h2 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-4xl mt-1">
                   Capture & analyze
                 </h2>
+              </div>
+
+              {/* Session context / notes — optional but improves AI analysis.
+                  Helps the coach explain *what* the athlete is working on so
+                  the AI doesn't flag intentional choices (e.g., no-jump form
+                  shots in basketball) as form errors. */}
+              <div className="border border-white/10 bg-[#0f0f0f] p-4">
+                <label
+                  htmlFor="session-notes"
+                  className="text-[10px] uppercase tracking-widest text-zinc-400 font-display font-bold flex items-center gap-2"
+                >
+                  Session context · optional
+                  <span className="text-zinc-600 normal-case tracking-normal text-[10px]">
+                    helps the AI analyze correctly
+                  </span>
+                </label>
+                <textarea
+                  id="session-notes"
+                  data-testid="session-notes-input"
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value.slice(0, 500))}
+                  placeholder={
+                    sport === "basketball"
+                      ? "e.g., Form shooting from 5 ft, no jump. Focus on follow-through and elbow alignment."
+                      : sport === "pickleball"
+                      ? "e.g., Practicing third-shot drop technique with consistent paddle face."
+                      : sport === "soccer"
+                      ? "e.g., Working on instep-curve free kicks, plant foot positioning."
+                      : sport === "swimming"
+                      ? "e.g., Freestyle stroke drills focusing on high-elbow catch."
+                      : "Describe what the athlete is working on — drill type, focus areas, intentional constraints…"
+                  }
+                  rows={3}
+                  maxLength={500}
+                  className="mt-2 w-full bg-black/70 border border-white/10 text-sm text-white placeholder:text-zinc-600 p-3 outline-none focus:border-[#ff3b30] resize-none"
+                />
+                {SPORT_SUGGESTIONS[sport]?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {SPORT_SUGGESTIONS[sport].map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() =>
+                          setNotes((cur) => (cur ? `${cur.trim()} · ${s}` : s).slice(0, 500))
+                        }
+                        data-testid={`note-chip-${s.replace(/\s+/g, "-").toLowerCase()}`}
+                        className="text-[10px] uppercase tracking-wider font-display font-bold text-zinc-300 hover:text-white bg-white/5 hover:bg-white/15 border border-white/10 px-2 py-1 transition-colors"
+                      >
+                        + {s}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="mt-1 text-[10px] text-zinc-600 text-right font-mono">
+                  {notes.length}/500
+                </div>
               </div>
 
               <PoseCanvas

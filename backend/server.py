@@ -375,7 +375,7 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
         raise HTTPException(400, f"Invalid sport. Must be one of {sorted(VALID_SPORTS)}")
     await _ensure_athlete_owned(req.athlete_id, user_id)
 
-    analysis = await analyze_form(req.sport, req.pose_summary or {"note": "minimal pose data"})
+    analysis = await analyze_form(req.sport, req.pose_summary or {"note": "minimal pose data"}, notes=req.notes)
 
     # Pull keyframes (base64 images) out of the raw pose summary so we can store them
     # at the top-level of the session doc, and keep the pose_summary lighter.
@@ -454,7 +454,7 @@ async def make_training_plan(
     s = await db.sessions.find_one({"id": session_id, "user_id": user_id}, {"_id": 0})
     if not s:
         raise HTTPException(404, "Session not found")
-    plan = await generate_training_plan(s["sport"], s.get("analysis", {}))
+    plan = await generate_training_plan(s["sport"], s.get("analysis", {}), notes=s.get("notes"))
     plan["id"] = str(uuid.uuid4())
     plan["sport"] = s["sport"]
     plan["athlete_id"] = s.get("athlete_id")

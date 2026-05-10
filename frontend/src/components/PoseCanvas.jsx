@@ -138,6 +138,9 @@ export default function PoseCanvas({
   // (distance-from-predicted) + (size similarity to locked ball) + confidence.
   const ballPredictRef = useRef(null); // {x, y, vx, vy, t}  velocity in normalized-units/sec
   const ballLockedSizeRef = useRef(null); // size at time of lock — preferred during tracking
+  // Trust score for visual feedback: 'solid' (high-confidence detection)
+  // | 'dashed' (predicted from velocity, no fresh detection) | 'lost'.
+  const trackQualityRef = useRef("lost");
   const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
   const ballDetectFrameSkipRef = useRef(0);
   const lastBallSeenAtRef = useRef(0);
@@ -447,20 +450,19 @@ export default function PoseCanvas({
         for (let i = 0; i < allBalls.length; i++) {
           const b = allBalls[i];
           const isTarget = target && Math.abs(b.x - target.x) < 0.001 && Math.abs(b.y - target.y) < 0.001;
+          if (isTarget) continue; // target is drawn separately below with trust styling
           ctx.save();
-          ctx.fillStyle = isTarget ? "#ff8c00" : "#ffb968";
+          ctx.fillStyle = "#ffb968";
           ctx.strokeStyle = "#ffffff";
-          ctx.lineWidth = isTarget ? 2 : 1;
-          ctx.globalAlpha = isTarget ? 1 : 0.55;
-          ctx.shadowColor = isTarget ? "#ff8c00" : "transparent";
-          ctx.shadowBlur = isTarget ? 10 : 0;
+          ctx.lineWidth = 1;
+          ctx.globalAlpha = 0.55;
           ctx.beginPath();
-          ctx.arc(b.x * w, b.y * h, isTarget ? 9 : 6, 0, Math.PI * 2);
+          ctx.arc(b.x * w, b.y * h, 6, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
           ctx.restore();
           // Number badge when multiple balls
-          if (allBalls.length > 1 && !isTarget) {
+          if (allBalls.length > 1) {
             ctx.save();
             ctx.fillStyle = "#000";
             ctx.font = "bold 11px sans-serif";
@@ -482,6 +484,46 @@ export default function PoseCanvas({
           ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
           ctx.fill();
         }
+      }
+      // Target ball with TRUST overlay:
+      //  solid  → high-confidence detection match (filled + solid ring)
+      //  dashed → extrapolated from velocity (hollow + dashed ring)
+      //  lost   → not drawn
+      const quality = trackQualityRef.current;
+      if (target && quality !== "lost") {
+        ctx.save();
+        const cx = target.x * w;
+        const cy = target.y * h;
+        if (quality === "dashed") {
+          // Predicted from velocity — yellow dashed ring, no fill
+          ctx.strokeStyle = "#ffd166";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 4]);
+          ctx.shadowColor = "#ffd166";
+          ctx.shadowBlur = 6;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 11, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          // small "?" badge to show it's a guess
+          ctx.fillStyle = "#ffd166";
+          ctx.font = "bold 9px sans-serif";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText("?", cx, cy);
+        } else {
+          // Solid — confident detection
+          ctx.fillStyle = "#ff8c00";
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.shadowColor = "#ff8c00";
+          ctx.shadowBlur = 10;
+          ctx.beginPath();
+          ctx.arc(cx, cy, 9, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
       }
 
       // Tracking-lost detection
@@ -576,6 +618,7 @@ export default function PoseCanvas({
     ballAnchorRef.current = null;
     ballLockedSizeRef.current = null;
     ballPredictRef.current = null;
+    trackQualityRef.current = "lost";
     ballAreaSamplesRef.current = [];
     liveShotStateRef.current = {
       inAttempt: false,
@@ -888,6 +931,33 @@ export default function PoseCanvas({
                         ball = allBalls.reduce((a, b) => (b.conf > (a?.conf || 0) ? b : a), null);
                       }
                     }
+                    // Trust score + short-term velocity extrapolation:
+                    // when ball is locked but no detection matched this frame,
+                    // synthesize a "predicted" position from velocity so the
+                    // circle keeps moving with the shot for ~250ms. After that
+                    // we declare it truly lost.
+                    if (ballAnchorRef.current) {
+                      if (ball) {
+                        trackQualityRef.current = "solid";
+                      } else {
+                        const pred = ballPredictRef.current;
+                        const dt = pred ? nowS - pred.t : Infinity;
+                        if (pred && dt < 0.25) {
+                          ball = {
+                            x: pred.x + pred.vx * dt,
+                            y: pred.y + pred.vy * dt,
+                            size: ballLockedSizeRef.current,
+                            conf: 0.0,
+                            extrapolated: true,
+                          };
+                          trackQualityRef.current = "dashed";
+                        } else {
+                          trackQualityRef.current = "lost";
+                        }
+                      }
+                    } else {
+                      trackQualityRef.current = ball ? "solid" : "lost";
+                    }
                     lastBallRef.current = ball;
                     // While target is locked AND we're not yet recording, sample
                     // its size so we can persist a fresh preference on stop.
@@ -910,13 +980,15 @@ export default function PoseCanvas({
                       // Hide the "ball detected" indicator after 1.5s without a hit
                       setBallSeen(false);
                     }
-                    // Record ball during capture
+                    // Record ball during capture (skip extrapolated positions —
+                    // shot detection should only consume real detections).
                     if (runningRef.current && startedAtRef.current != null) {
                       const t = (Date.now() - startedAtRef.current) / 1000;
-                      ballFramesRef.current.push(ball ? { t, ...ball } : { t, x: null, y: null, conf: 0 });
-                      // Live make/miss detection while recording
-                      if (ball && hoopRoiRef.current) {
-                        evaluateLiveShot(t, ball);
+                      const recordBall = ball && !ball.extrapolated ? ball : null;
+                      ballFramesRef.current.push(recordBall ? { t, ...recordBall } : { t, x: null, y: null, conf: 0 });
+                      // Live make/miss detection while recording (real ball only)
+                      if (recordBall && hoopRoiRef.current) {
+                        evaluateLiveShot(t, recordBall);
                       }
                     }
                   } catch (be) {

@@ -67,8 +67,13 @@ def _compact_for_prompt(pose_summary: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-async def analyze_form(sport: str, pose_summary: dict[str, Any]) -> dict:
-    """Produce a sport-specific AI biomechanics report from rep-level pose data."""
+async def analyze_form(sport: str, pose_summary: dict[str, Any], notes: str | None = None) -> dict:
+    """Produce a sport-specific AI biomechanics report from rep-level pose data.
+    
+    `notes` (optional) is user-provided session context (e.g. "Form shots, no jump")
+    that tells the AI what the athlete is intentionally doing — prevents the AI
+    from flagging deliberate choices as form errors.
+    """
     ctx = SPORT_CONTEXT.get(sport, {"key_metrics": "general athletic form", "elite_benchmark": "general elite athletic form", "rep_unit": "rep"})
     rep_count = pose_summary.get("rep_count", 0)
     no_reps = pose_summary.get("no_reps_detected", False) or rep_count == 0
@@ -103,6 +108,21 @@ async def analyze_form(sport: str, pose_summary: dict[str, Any]) -> dict:
         "You return STRICT JSON only — no markdown, no commentary outside the JSON object."
     )
 
+    # User-provided session context — tells the AI what the athlete is
+    # intentionally working on (e.g. "form shots, no jump") so it doesn't
+    # flag deliberate constraints as form errors and instead evaluates the
+    # athlete *against the actual drill being practised*.
+    context_block = ""
+    notes_clean = (notes or "").strip()
+    if notes_clean:
+        context_block = (
+            f"\n\nATHLETE SESSION CONTEXT (provided by coach): \"{notes_clean[:500]}\"\n"
+            "Treat this as ground-truth about the athlete's intent. Adjust your analysis:\n"
+            "- Do NOT flag intentional constraints (e.g. no jump in form shots) as form errors.\n"
+            "- Reference this context in your `summary` and `next_focus`.\n"
+            "- Tailor `improvements` and `next_focus` specifically to the drill described.\n"
+        )
+
     # Build basketball-specific outcome-correlation block when shot data is present
     outcome_block = ""
     shot_outcomes = pose_summary.get("shot_outcomes")
@@ -123,7 +143,7 @@ SHOT OUTCOMES (from ball-tracking + hoop ROI):
     prompt = f"""Analyse this {sport} performance using the per-rep kinematic data.
 
 KEY METRICS FOR {sport.upper()}: {ctx['key_metrics']}
-ELITE BENCHMARK: {ctx['elite_benchmark']}
+ELITE BENCHMARK: {ctx['elite_benchmark']}{context_block}
 
 SESSION DATA (each rep is one {ctx['rep_unit']}; angles are degrees, all measurements at the rep apex):
 {json.dumps(_compact_for_prompt(pose_summary), indent=2)}{outcome_block}
@@ -175,11 +195,18 @@ Return ONLY this JSON:
     return result
 
 
-async def generate_training_plan(sport: str, analysis: dict, athlete_level: str = "intermediate") -> dict:
+async def generate_training_plan(sport: str, analysis: dict, athlete_level: str = "intermediate", notes: str | None = None) -> dict:
     system = (
         "You are an elite sports performance coach designing personalized training programs. "
         "Return STRICT JSON only — no markdown, no commentary."
     )
+    notes_hint = ""
+    notes_clean = (notes or "").strip()
+    if notes_clean:
+        notes_hint = (
+            f"\n\nATHLETE SESSION CONTEXT: \"{notes_clean[:500]}\"\n"
+            "Build the plan to advance THIS specific drill/focus over the week."
+        )
     outcome_hint = ""
     shot_outcomes = analysis.get("shot_outcomes") if isinstance(analysis, dict) else None
     makes_vs_misses = analysis.get("makes_vs_misses") if isinstance(analysis, dict) else None
@@ -198,7 +225,7 @@ async def generate_training_plan(sport: str, analysis: dict, athlete_level: str 
     prompt = f"""Design a 7-day personalized training plan for a {athlete_level} {sport} athlete based on their form analysis.
 
 FORM ANALYSIS:
-{json.dumps(analysis, indent=2)}{outcome_hint}
+{json.dumps(analysis, indent=2)}{notes_hint}{outcome_hint}
 
 Return ONLY this JSON (no extra text):
 {{
