@@ -7,8 +7,19 @@ const BBALL =
   "https://images.unsplash.com/photo-1519432473078-0151c4f90335?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NTYxOTJ8MHwxfHNlYXJjaHwzfHxiYXNrZXRiYWxsJTIwcGxheWVyJTIwZGFya3xlbnwwfHx8fDE3NzgxNTM5MDR8MA&ixlib=rb-4.1.0&q=85";
 const RUN =
   "https://images.pexels.com/photos/15875672/pexels-photo-15875672.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940";
+const SOCCER =
+  "https://customer-assets.emergentagent.com/job_motion-trainer-pro/artifacts/enc55cup_soulprint-image-1778439539210.png";
+const SWIMMING =
+  "https://customer-assets.emergentagent.com/job_motion-trainer-pro/artifacts/hr98x4i9_soulprint-image-1778439777825.png";
+const PICKLEBALL =
+  "https://customer-assets.emergentagent.com/job_motion-trainer-pro/artifacts/mpvk9uoc_soulprint-image-1778439740099.png";
 
-const SPORTS = ["Basketball", "Soccer", "Swimming", "Pickleball"];
+const SPORTS = [
+  { name: "Basketball", img: BBALL },
+  { name: "Soccer", img: SOCCER },
+  { name: "Swimming", img: SWIMMING },
+  { name: "Pickleball", img: PICKLEBALL },
+];
 
 export default function Landing() {
   return (
@@ -152,12 +163,12 @@ export default function Landing() {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {SPORTS.map((s, i) => (
               <div
-                key={s}
-                data-testid={`sport-card-${s.toLowerCase()}`}
+                key={s.name}
+                data-testid={`sport-card-${s.name.toLowerCase()}`}
                 className="relative border border-white/10 bg-[#121212] aspect-[4/5] overflow-hidden group"
               >
                 <img
-                  src={i === 0 ? BBALL : RUN}
+                  src={s.img}
                   alt=""
                   className="absolute inset-0 w-full h-full object-cover opacity-40 group-hover:opacity-60 transition-opacity"
                 />
@@ -167,7 +178,7 @@ export default function Landing() {
                     0{i + 1}
                   </div>
                   <h3 className="font-display font-black text-2xl uppercase tracking-tight">
-                    {s}
+                    {s.name}
                   </h3>
                 </div>
                 <div className="absolute top-4 right-4 w-3 h-3 border border-[#00ff88]" />
