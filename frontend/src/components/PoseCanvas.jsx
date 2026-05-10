@@ -127,13 +127,17 @@ export default function PoseCanvas({
   // Basketball: ball trajectory + hoop ROI for make/miss detection
   const ballDetectorRef = useRef(null);
   const ballFramesRef = useRef([]); // {t, x, y, conf}[] during recording (only when target is locked + running)
-  const lastBallRef = useRef(null); // most recent detected ball {x, y, conf} (live preview)
+  const lastBallRef = useRef(null); // most recent detected target ball {x, y, conf} (live preview)
+  const lastBallsRef = useRef([]); // all detected balls in current frame (for multi-ball picker)
+  const ballAnchorRef = useRef(null); // {x, y} when user has explicitly locked a specific ball; null = auto-pick highest-conf
   const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
   const ballDetectFrameSkipRef = useRef(0);
   const lastBallSeenAtRef = useRef(0);
   const hoopRoiRef = useRef(null); // mirror of hoopRoi state for rAF reads
   const [ballDetectorState, setBallDetectorState] = useState("idle"); // 'idle' | 'loading' | 'ready' | 'failed'
   const [ballSeen, setBallSeen] = useState(false);
+  const [hasLockedBall, setHasLockedBall] = useState(false);
+  const [ballCount, setBallCount] = useState(0);
   const [hoopRoi, setHoopRoi] = useState(null); // {x, y, w, h} normalized
   const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'ready'
   const [liveMakes, setLiveMakes] = useState(0);
@@ -362,31 +366,49 @@ export default function PoseCanvas({
         ctx.restore();
       }
 
-      // Draw ball trail (fading orange dots) + current ball position (filled circle)
+      // Draw all detected balls. When multiple, dim non-target ones and
+      // number them so the user can tap to pick a specific ball.
+      const allBalls = lastBallsRef.current || [];
+      const target = lastBallRef.current;
+      if (allBalls.length > 0) {
+        for (let i = 0; i < allBalls.length; i++) {
+          const b = allBalls[i];
+          const isTarget = target && Math.abs(b.x - target.x) < 0.001 && Math.abs(b.y - target.y) < 0.001;
+          ctx.save();
+          ctx.fillStyle = isTarget ? "#ff8c00" : "#ffb968";
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = isTarget ? 2 : 1;
+          ctx.globalAlpha = isTarget ? 1 : 0.55;
+          ctx.shadowColor = isTarget ? "#ff8c00" : "transparent";
+          ctx.shadowBlur = isTarget ? 10 : 0;
+          ctx.beginPath();
+          ctx.arc(b.x * w, b.y * h, isTarget ? 9 : 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+          // Number badge when multiple balls
+          if (allBalls.length > 1 && !isTarget) {
+            ctx.save();
+            ctx.fillStyle = "#000";
+            ctx.font = "bold 11px sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText(String(i + 1), b.x * w, b.y * h);
+            ctx.restore();
+          }
+        }
+      }
+      // Trail from the *target* ball only (already pushed by detector tick)
       const trail = ballTrailRef.current;
       if (trail.length > 0) {
         for (let i = 0; i < trail.length; i++) {
           const p = trail[i];
           const alpha = (i + 1) / trail.length;
-          ctx.fillStyle = `rgba(255, 165, 0, ${alpha * 0.6})`;
+          ctx.fillStyle = `rgba(255, 165, 0, ${alpha * 0.55})`;
           ctx.beginPath();
-          ctx.arc(p.x * w, p.y * h, 4, 0, Math.PI * 2);
+          ctx.arc(p.x * w, p.y * h, 3, 0, Math.PI * 2);
           ctx.fill();
         }
-      }
-      const ball = lastBallRef.current;
-      if (ball) {
-        ctx.save();
-        ctx.fillStyle = "#ff8c00";
-        ctx.strokeStyle = "#ffffff";
-        ctx.lineWidth = 2;
-        ctx.shadowColor = "#ff8c00";
-        ctx.shadowBlur = 10;
-        ctx.beginPath();
-        ctx.arc(ball.x * w, ball.y * h, 9, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
       }
 
       // Tracking-lost detection
@@ -477,6 +499,8 @@ export default function PoseCanvas({
     ballFramesRef.current = [];
     ballTrailRef.current = [];
     lastBallRef.current = null;
+    lastBallsRef.current = [];
+    ballAnchorRef.current = null;
     liveShotStateRef.current = {
       inAttempt: false,
       apex: null,
@@ -491,6 +515,9 @@ export default function PoseCanvas({
     setPlacementStep("athlete");
     setLiveMakes(0);
     setLiveAttempts(0);
+    setHasLockedBall(false);
+    setBallCount(0);
+    setBallSeen(false);
   }, [videoSrc, mode, sport]);
 
   /* ---------------- Pose model + camera setup ---------------- */
@@ -685,19 +712,41 @@ export default function PoseCanvas({
                   try {
                     const detRes = ballDet.detectForVideo(v, performance.now());
                     const dets = detRes?.detections || [];
-                    let ball = null;
-                    let bestScore = 0;
+                    // Collect ALL detected sports balls so the user can pick
+                    // which one to track when multiple are visible.
+                    const allBalls = [];
                     for (const d of dets) {
                       const cat = d.categories?.[0];
-                      const score = cat?.score || 0;
-                      if (cat?.categoryName === "sports ball" && score > bestScore) {
-                        const bb = d.boundingBox;
-                        if (bb) {
-                          const cx = (bb.originX + bb.width / 2) / v.videoWidth;
-                          const cy = (bb.originY + bb.height / 2) / v.videoHeight;
-                          ball = { x: cx, y: cy, conf: score };
-                          bestScore = score;
+                      if (cat?.categoryName !== "sports ball") continue;
+                      const bb = d.boundingBox;
+                      if (!bb) continue;
+                      allBalls.push({
+                        x: (bb.originX + bb.width / 2) / v.videoWidth,
+                        y: (bb.originY + bb.height / 2) / v.videoHeight,
+                        conf: cat.score || 0,
+                      });
+                    }
+                    lastBallsRef.current = allBalls;
+                    setBallCount(allBalls.length);
+                    // Pick the *target* ball: nearest to user-locked anchor,
+                    // else highest-confidence detection.
+                    let ball = null;
+                    if (allBalls.length > 0) {
+                      if (ballAnchorRef.current) {
+                        let bestD = Infinity;
+                        for (const b of allBalls) {
+                          const d = dist2D(b, ballAnchorRef.current);
+                          if (d < bestD) {
+                            bestD = d;
+                            ball = b;
+                          }
                         }
+                        // Update anchor if we found something reasonable
+                        if (ball && bestD < 0.25) ballAnchorRef.current = { x: ball.x, y: ball.y };
+                        else if (bestD >= 0.25) ball = null; // tracking lost
+                      } else {
+                        // No user lock — pick highest-confidence
+                        ball = allBalls.reduce((a, b) => (b.conf > (a?.conf || 0) ? b : a), null);
                       }
                     }
                     lastBallRef.current = ball;
@@ -865,6 +914,30 @@ export default function PoseCanvas({
       return;
     }
 
+    // Basketball — when hoop is placed and multiple balls are visible,
+    // the user can tap a ball to lock tracking onto it. Check ball-tap
+    // BEFORE athlete-tap because balls are smaller/higher targets.
+    if (sport === "basketball" && placementStep === "ready") {
+      const balls = lastBallsRef.current || [];
+      if (balls.length >= 1) {
+        let bestB = null;
+        let bestBd = Infinity;
+        for (const b of balls) {
+          const d = dist2D(b, click);
+          if (d < bestBd) {
+            bestBd = d;
+            bestB = b;
+          }
+        }
+        // Generous radius for ball tap (balls are small on screen)
+        if (bestB && bestBd < 0.12 / zoom) {
+          ballAnchorRef.current = { x: bestB.x, y: bestB.y };
+          setHasLockedBall(true);
+          return;
+        }
+      }
+    }
+
     // Step 1: pick athlete by tap-nearest pose
     const poses = lastPosesRef.current;
     if (!poses.length) return;
@@ -881,8 +954,10 @@ export default function PoseCanvas({
         bestIdx = i;
       }
     });
-    // Click radius scales inversely with zoom (smaller in image space when zoomed)
-    if (bestIdx >= 0 && bestDist < 0.25 / zoom) {
+    // Click radius scales inversely with zoom but is generous on mobile —
+    // the original 0.25 was too tight on small screens. 0.4 = nearly half
+    // the canvas width, but bestDist comparison still picks the closest pose.
+    if (bestIdx >= 0 && bestDist < 0.4 / zoom) {
       const c = hipCenter(poses[bestIdx]);
       if (c) {
         targetAnchorRef.current = c;
@@ -1181,19 +1256,21 @@ export default function PoseCanvas({
           </div>
         )}
 
-        {/* tap-to-select / tap-to-place-hoop instructions overlay */}
+        {/* tap-to-select / tap-to-place-hoop instructions overlay.
+            Top-aligned + small so it doesn't cover the rim or athlete area
+            on mobile portrait. */}
         {!running && status === "ready" && !error && placementStep !== "ready" && (
           <div
             data-testid="tap-to-select-banner"
-            className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ff3b30]/50 px-5 py-3 text-center pointer-events-none"
+            className="absolute top-12 left-1/2 -translate-x-1/2 max-w-[88%] bg-black/85 backdrop-blur border border-[#ff3b30]/50 px-3 py-1.5 text-center pointer-events-none flex items-center gap-2"
           >
-            <Target className="w-5 h-5 text-[#ff3b30] mx-auto" />
-            <div className="mt-1 text-[11px] uppercase tracking-widest font-display font-bold text-white">
+            <Target className="w-3.5 h-3.5 text-[#ff3b30] flex-shrink-0" />
+            <div className="text-[10px] sm:text-[11px] uppercase tracking-widest font-display font-bold text-white whitespace-nowrap overflow-hidden text-ellipsis">
               {placementStep === "athlete"
                 ? personCount === 0
-                  ? "Position the athlete in frame"
-                  : `Step 1 / ${sport === "basketball" ? "2" : "1"} · Tap the athlete (${personCount} detected)`
-                : "Step 2 / 2 · Tap the rim to place the hoop"}
+                  ? "Position athlete in frame"
+                  : `Tap athlete (${personCount})`
+                : "Tap the rim"}
             </div>
           </div>
         )}
@@ -1256,9 +1333,13 @@ export default function PoseCanvas({
                 ? "Ball model failed"
                 : ballDetectorState === "loading"
                   ? "Loading ball model"
-                  : ballSeen
-                    ? "Ball tracked"
-                    : "Ball: searching"}
+                  : hasLockedBall && ballSeen
+                    ? "Ball locked"
+                    : ballCount > 1 && !running
+                      ? `${ballCount} balls · tap to pick`
+                      : ballSeen
+                        ? "Ball tracked"
+                        : "Ball: searching"}
             </span>
           </div>
         )}
