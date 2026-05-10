@@ -98,6 +98,7 @@ export default function PoseCanvas({
   mode = "live",
   videoSrc = null,
   sport = "basketball",
+  athleteId = null,
   onReady,
   trimStart = 0,
   trimEnd = null,
@@ -133,11 +134,17 @@ export default function PoseCanvas({
   const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
   const ballDetectFrameSkipRef = useRef(0);
   const lastBallSeenAtRef = useRef(0);
+  // Ball preference memory: stores median area (sqrt-area as fraction of frame
+  // diagonal) of the user's preferred ball from the last completed session for
+  // this athlete. Used to auto-prefer similarly-sized balls during selection.
+  const ballAreaSamplesRef = useRef([]); // sqrt(width*height)/diag samples while target is locked
+  const preferredBallSizeRef = useRef(null); // {size, conf, savedAt} loaded from localStorage
   const hoopRoiRef = useRef(null); // mirror of hoopRoi state for rAF reads
   const [ballDetectorState, setBallDetectorState] = useState("idle"); // 'idle' | 'loading' | 'ready' | 'failed'
   const [ballSeen, setBallSeen] = useState(false);
   const [hasLockedBall, setHasLockedBall] = useState(false);
   const [ballCount, setBallCount] = useState(0);
+  const [hasBallPref, setHasBallPref] = useState(false);
   const [hoopRoi, setHoopRoi] = useState(null); // {x, y, w, h} normalized
   const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'ready'
   const [liveMakes, setLiveMakes] = useState(0);
@@ -154,6 +161,57 @@ export default function PoseCanvas({
   useEffect(() => {
     hoopRoiRef.current = hoopRoi;
   }, [hoopRoi]);
+
+  // Ball preference memory: keyed per athlete (and "default" fallback).
+  const ballPrefKey = `vk_ballpref_${athleteId || "default"}`;
+  function loadBallPref() {
+    try {
+      const raw = localStorage.getItem(ballPrefKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      // Stale entries (>180 days) get ignored
+      if (parsed?.savedAt) {
+        const ageMs = Date.now() - new Date(parsed.savedAt).getTime();
+        if (ageMs > 180 * 24 * 60 * 60 * 1000) return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+  function saveBallPref(size) {
+    if (!size || size <= 0) return;
+    try {
+      localStorage.setItem(
+        ballPrefKey,
+        JSON.stringify({ size, conf: 1, savedAt: new Date().toISOString() })
+      );
+    } catch {
+      /* private mode etc. */
+    }
+  }
+  // Load preference once when the athlete or sport changes
+  useEffect(() => {
+    if (sport !== "basketball") {
+      preferredBallSizeRef.current = null;
+      setHasBallPref(false);
+      return;
+    }
+    const pref = loadBallPref();
+    preferredBallSizeRef.current = pref;
+    setHasBallPref(!!pref);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [athleteId, sport]);
+
+  function forgetBallPref() {
+    try {
+      localStorage.removeItem(ballPrefKey);
+    } catch {
+      /* ignore */
+    }
+    preferredBallSizeRef.current = null;
+    setHasBallPref(false);
+  }
 
   // Live shot state machine: mirrors shotDetection.js logic for real-time UX
   function evaluateLiveShot(t, ball) {
@@ -501,6 +559,7 @@ export default function PoseCanvas({
     lastBallRef.current = null;
     lastBallsRef.current = [];
     ballAnchorRef.current = null;
+    ballAreaSamplesRef.current = [];
     liveShotStateRef.current = {
       inAttempt: false,
       apex: null,
@@ -715,20 +774,24 @@ export default function PoseCanvas({
                     // Collect ALL detected sports balls so the user can pick
                     // which one to track when multiple are visible.
                     const allBalls = [];
+                    const diag = Math.hypot(v.videoWidth, v.videoHeight) || 1;
                     for (const d of dets) {
                       const cat = d.categories?.[0];
                       if (cat?.categoryName !== "sports ball") continue;
                       const bb = d.boundingBox;
                       if (!bb) continue;
+                      const sizeNorm = Math.sqrt(bb.width * bb.height) / diag;
                       allBalls.push({
                         x: (bb.originX + bb.width / 2) / v.videoWidth,
                         y: (bb.originY + bb.height / 2) / v.videoHeight,
+                        size: sizeNorm,
                         conf: cat.score || 0,
                       });
                     }
                     lastBallsRef.current = allBalls;
                     setBallCount(allBalls.length);
                     // Pick the *target* ball: nearest to user-locked anchor,
+                    // else by stored preference (similar size to last session),
                     // else highest-confidence detection.
                     let ball = null;
                     if (allBalls.length > 0) {
@@ -741,15 +804,36 @@ export default function PoseCanvas({
                             ball = b;
                           }
                         }
-                        // Update anchor if we found something reasonable
                         if (ball && bestD < 0.25) ballAnchorRef.current = { x: ball.x, y: ball.y };
-                        else if (bestD >= 0.25) ball = null; // tracking lost
+                        else if (bestD >= 0.25) ball = null;
+                      } else if (preferredBallSizeRef.current?.size && allBalls.length > 1) {
+                        // Auto-pick the ball whose size is closest to the
+                        // user's stored preference. Score = confidence weighted
+                        // by inverse size-delta so high-confidence + similar
+                        // size wins.
+                        const targetSize = preferredBallSizeRef.current.size;
+                        let bestScore = -Infinity;
+                        for (const b of allBalls) {
+                          const sizeDelta = Math.abs(b.size - targetSize) / Math.max(targetSize, 1e-4);
+                          const score = b.conf - sizeDelta * 0.6;
+                          if (score > bestScore) {
+                            bestScore = score;
+                            ball = b;
+                          }
+                        }
                       } else {
-                        // No user lock — pick highest-confidence
                         ball = allBalls.reduce((a, b) => (b.conf > (a?.conf || 0) ? b : a), null);
                       }
                     }
                     lastBallRef.current = ball;
+                    // While target is locked AND we're not yet recording, sample
+                    // its size so we can persist a fresh preference on stop.
+                    if (ball && ballAnchorRef.current && ball.size) {
+                      ballAreaSamplesRef.current.push(ball.size);
+                      if (ballAreaSamplesRef.current.length > 240) {
+                        ballAreaSamplesRef.current.shift();
+                      }
+                    }
                     // Maintain trail (last 30 positions for live render)
                     if (ball) {
                       ballTrailRef.current.push({ ...ball, t: performance.now() / 1000 });
@@ -1133,6 +1217,16 @@ export default function PoseCanvas({
         /* ignore */
       }
     }
+    // Persist ball-size preference for this athlete: median of all locked-ball
+    // size samples collected during the session. Used next time to auto-prefer
+    // similarly-sized balls during selection.
+    if (sport === "basketball" && ballAreaSamplesRef.current.length >= 8) {
+      const sorted = [...ballAreaSamplesRef.current].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)];
+      saveBallPref(median);
+      preferredBallSizeRef.current = { size: median, conf: 1, savedAt: new Date().toISOString() };
+      setHasBallPref(true);
+    }
     const frames = framesRef.current;
     const detected = frames.filter((f) => f.lm).length;
     const duration_s =
@@ -1322,7 +1416,7 @@ export default function PoseCanvas({
                     : ballDetectorState === "ready"
                       ? "bg-black/70 border-white/15"
                       : "bg-black/70 border-white/10"
-            } ${hasLockedBall && !running ? "pointer-events-auto cursor-pointer hover:bg-[#ff8c00]/25" : "pointer-events-none"}`}
+            } ${(hasLockedBall && !running) ? "pointer-events-auto cursor-pointer hover:bg-[#ff8c00]/25" : (hasBallPref && !running) ? "pointer-events-auto" : "pointer-events-none"}`}
             onClick={hasLockedBall && !running ? clearBallLock : undefined}
             title={hasLockedBall && !running ? "Tap to pick a different ball" : undefined}
           >
@@ -1355,7 +1449,9 @@ export default function PoseCanvas({
                     : ballCount > 1 && !running
                       ? `${ballCount} balls · tap to pick`
                       : ballSeen
-                        ? "Ball tracked"
+                        ? hasBallPref && !running
+                          ? "Ball · smart pick"
+                          : "Ball tracked"
                         : "Ball: searching"}
             </span>
             {hasLockedBall && !running && (
@@ -1365,6 +1461,19 @@ export default function PoseCanvas({
               >
                 change
               </span>
+            )}
+            {!hasLockedBall && hasBallPref && !running && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  forgetBallPref();
+                }}
+                data-testid="forget-ball-pref-btn"
+                className="text-[9px] uppercase tracking-widest text-zinc-300 hover:text-white ml-1 underline-offset-2 underline pointer-events-auto"
+                title="Clear remembered ball size for this athlete"
+              >
+                reset
+              </button>
             )}
           </div>
         )}

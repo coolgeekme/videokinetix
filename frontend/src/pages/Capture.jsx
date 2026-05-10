@@ -260,6 +260,7 @@ export default function Capture() {
                 mode={mode}
                 videoSrc={videoSrc}
                 sport={sport}
+                athleteId={athleteId}
                 trimStart={trim[0]}
                 trimEnd={trim[1] || null}
                 onStop={handleStop}
