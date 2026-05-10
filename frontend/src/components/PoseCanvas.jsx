@@ -131,6 +131,13 @@ export default function PoseCanvas({
   const lastBallRef = useRef(null); // most recent detected target ball {x, y, conf} (live preview)
   const lastBallsRef = useRef([]); // all detected balls in current frame (for multi-ball picker)
   const ballAnchorRef = useRef(null); // {x, y} when user has explicitly locked a specific ball; null = auto-pick highest-conf
+  // Velocity-aware prediction state for the locked ball. Critical for keeping
+  // tracking glued to a fast-moving basketball during a shot — frame-to-frame
+  // the ball can travel >25% of the canvas, blowing past a naive nearest-anchor
+  // gate. We predict the next position from velocity and score detections by
+  // (distance-from-predicted) + (size similarity to locked ball) + confidence.
+  const ballPredictRef = useRef(null); // {x, y, vx, vy, t}  velocity in normalized-units/sec
+  const ballLockedSizeRef = useRef(null); // size at time of lock — preferred during tracking
   const ballTrailRef = useRef([]); // last ~30 ball positions for live trail render
   const ballDetectFrameSkipRef = useRef(0);
   const lastBallSeenAtRef = useRef(0);
@@ -212,6 +219,14 @@ export default function PoseCanvas({
     preferredBallSizeRef.current = null;
     setHasBallPref(false);
   }
+
+  const clearBallLock = () => {
+    if (running) return;
+    ballAnchorRef.current = null;
+    ballLockedSizeRef.current = null;
+    ballPredictRef.current = null;
+    setHasLockedBall(false);
+  };
 
   // Live shot state machine: mirrors shotDetection.js logic for real-time UX
   function evaluateLiveShot(t, ball) {
@@ -559,6 +574,8 @@ export default function PoseCanvas({
     lastBallRef.current = null;
     lastBallsRef.current = [];
     ballAnchorRef.current = null;
+    ballLockedSizeRef.current = null;
+    ballPredictRef.current = null;
     ballAreaSamplesRef.current = [];
     liveShotStateRef.current = {
       inAttempt: false,
@@ -790,27 +807,73 @@ export default function PoseCanvas({
                     }
                     lastBallsRef.current = allBalls;
                     setBallCount(allBalls.length);
-                    // Pick the *target* ball: nearest to user-locked anchor,
-                    // else by stored preference (similar size to last session),
-                    // else highest-confidence detection.
+                    // Pick the *target* ball using one of three strategies:
+                    //   1) User locked → predict next position from velocity,
+                    //      score detections by distance + size similarity + conf.
+                    //   2) No lock but ball-size preference exists → prefer
+                    //      similarly-sized ball.
+                    //   3) Otherwise → highest-confidence detection.
                     let ball = null;
+                    const nowS = performance.now() / 1000;
                     if (allBalls.length > 0) {
                       if (ballAnchorRef.current) {
-                        let bestD = Infinity;
+                        // (1) Velocity-aware tracking — robust to fast motion.
+                        const pred = ballPredictRef.current;
+                        let predX = ballAnchorRef.current.x;
+                        let predY = ballAnchorRef.current.y;
+                        if (pred) {
+                          const dt = Math.min(0.2, Math.max(0, nowS - pred.t));
+                          predX = pred.x + pred.vx * dt;
+                          predY = pred.y + pred.vy * dt;
+                        }
+                        const targetSize = ballLockedSizeRef.current;
+                        let bestScore = -Infinity;
                         for (const b of allBalls) {
-                          const d = dist2D(b, ballAnchorRef.current);
-                          if (d < bestD) {
-                            bestD = d;
+                          const d = Math.hypot(b.x - predX, b.y - predY);
+                          // Size similarity (0 = exact match, 1+ = very different)
+                          const sizeDelta = targetSize
+                            ? Math.abs(b.size - targetSize) / Math.max(targetSize, 1e-4)
+                            : 0;
+                          // Composite score — confidence is the base, distance
+                          // is the strongest negative term, size similarity is
+                          // a tiebreaker. Scaled so a 0.05-distance miss costs
+                          // ~0.5 score (i.e. very high-conf detection 0.05 away
+                          // still beats a low-conf detection on top of anchor).
+                          const score = b.conf - d * 5 - sizeDelta * 0.4;
+                          if (score > bestScore) {
+                            bestScore = score;
                             ball = b;
                           }
                         }
-                        if (ball && bestD < 0.25) ballAnchorRef.current = { x: ball.x, y: ball.y };
-                        else if (bestD >= 0.25) ball = null;
+                        // Generous gate during tracking: 0.45 normalized distance
+                        // from the predicted position is enough — we'll trust it.
+                        const finalDist = ball
+                          ? Math.hypot(ball.x - predX, ball.y - predY)
+                          : Infinity;
+                        if (finalDist > 0.45) ball = null; // truly lost
+                        if (ball) {
+                          // Update anchor + velocity (smoothed via EMA so a single
+                          // outlier doesn't whipsaw the prediction).
+                          if (pred) {
+                            const dtPred = Math.max(0.001, nowS - pred.t);
+                            const rawVx = (ball.x - pred.x) / dtPred;
+                            const rawVy = (ball.y - pred.y) / dtPred;
+                            const alpha = 0.55;
+                            ballPredictRef.current = {
+                              x: ball.x,
+                              y: ball.y,
+                              vx: alpha * rawVx + (1 - alpha) * pred.vx,
+                              vy: alpha * rawVy + (1 - alpha) * pred.vy,
+                              t: nowS,
+                            };
+                          } else {
+                            ballPredictRef.current = {
+                              x: ball.x, y: ball.y, vx: 0, vy: 0, t: nowS,
+                            };
+                          }
+                          ballAnchorRef.current = { x: ball.x, y: ball.y };
+                        }
                       } else if (preferredBallSizeRef.current?.size && allBalls.length > 1) {
-                        // Auto-pick the ball whose size is closest to the
-                        // user's stored preference. Score = confidence weighted
-                        // by inverse size-delta so high-confidence + similar
-                        // size wins.
                         const targetSize = preferredBallSizeRef.current.size;
                         let bestScore = -Infinity;
                         for (const b of allBalls) {
@@ -1017,6 +1080,14 @@ export default function PoseCanvas({
         // taps land somewhere near the ball, not exactly on it).
         if (bestB && bestBd < 0.2 / zoom) {
           ballAnchorRef.current = { x: bestB.x, y: bestB.y };
+          ballLockedSizeRef.current = bestB.size || null;
+          ballPredictRef.current = {
+            x: bestB.x,
+            y: bestB.y,
+            vx: 0,
+            vy: 0,
+            t: performance.now() / 1000,
+          };
           setHasLockedBall(true);
           return;
         }
@@ -1069,12 +1140,6 @@ export default function PoseCanvas({
     if (running) return;
     setHoopRoi(null);
     setPlacementStep("hoop");
-  };
-
-  const clearBallLock = () => {
-    if (running) return;
-    ballAnchorRef.current = null;
-    setHasLockedBall(false);
   };
 
   // Suppress click after a pan-drag so dragging doesn't accidentally lock onto someone
