@@ -13,6 +13,7 @@ import AthleteDetail from "@/pages/AthleteDetail";
 import Capture from "@/pages/Capture";
 import Sessions from "@/pages/Sessions";
 import SessionDetail from "@/pages/SessionDetail";
+import MatchDetail from "@/pages/MatchDetail";
 import TrainingPlans from "@/pages/TrainingPlans";
 import Goals from "@/pages/Goals";
 
@@ -40,6 +41,7 @@ function App() {
               <Route path="capture" element={<Capture />} />
               <Route path="sessions" element={<Sessions />} />
               <Route path="sessions/:id" element={<SessionDetail />} />
+              <Route path="matches/:matchId" element={<MatchDetail />} />
               <Route path="training-plans" element={<TrainingPlans />} />
               <Route path="goals" element={<Goals />} />
             </Route>

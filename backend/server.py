@@ -447,6 +447,18 @@ async def get_session(session_id: str, user_id: str = Depends(get_current_user_i
     return s
 
 
+@api.get("/matches/{match_id}")
+async def get_match(match_id: str, user_id: str = Depends(get_current_user_id)):
+    """Return all per-player sessions for a doubles-match grouping."""
+    cursor = db.sessions.find(
+        {"user_id": user_id, "match_id": match_id}, {"_id": 0}
+    ).sort("player_slot", 1)
+    sessions = await cursor.to_list(length=10)
+    if not sessions:
+        raise HTTPException(404, "Match not found")
+    return {"match_id": match_id, "sessions": sessions}
+
+
 @api.delete("/sessions/{session_id}")
 async def delete_session(session_id: str, user_id: str = Depends(get_current_user_id)):
     res = await db.sessions.delete_one({"id": session_id, "user_id": user_id})

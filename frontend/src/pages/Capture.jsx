@@ -136,30 +136,51 @@ export default function Capture() {
     // One UUID groups all per-player sessions for this match.
     const matchId = (window.crypto?.randomUUID && window.crypto.randomUUID()) ||
                     `m-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    // POST all sessions IN PARALLEL — each call runs an LLM analysis on the
+    // backend (~20s). Sequentially that's 60-100s total which iOS Safari/PWA
+    // tends to abort mid-flight. Promise.allSettled means one failure doesn't
+    // kill the others — we report partial success rather than dropping data.
     try {
-      const created = [];
-      for (const p of players) {
-        const summary = p.analysis;
-        if (!summary || (summary.rep_count ?? 0) === 0) {
-          // Still create the session so the user can see "no reps detected"
-          // for that slot rather than silently dropping it.
-        }
-        const { data } = await api.post("/sessions", {
-          athlete_id: athleteId,
-          sport,
-          mode,
-          duration_seconds: p.duration_seconds,
-          pose_summary: summary,
-          notes: (notes.trim() ? `${notes.trim()} · ` : "") + `Player ${p.slot + 1} (match)`,
-          match_id: matchId,
-          player_slot: p.slot + 1,
-        });
-        created.push(data);
+      const results = await Promise.allSettled(
+        players.map((p) =>
+          api.post("/sessions", {
+            athlete_id: athleteId,
+            sport,
+            mode,
+            duration_seconds: p.duration_seconds,
+            pose_summary: p.analysis,
+            notes:
+              (notes.trim() ? `${notes.trim()} · ` : "") +
+              `Player ${p.slot + 1} (match)`,
+            match_id: matchId,
+            player_slot: p.slot + 1,
+          })
+        )
+      );
+      const created = results
+        .filter((r) => r.status === "fulfilled")
+        .map((r) => r.value.data);
+      const failed = results.filter((r) => r.status === "rejected");
+      if (created.length === 0) {
+        toast.error(errMsg(failed[0]?.reason, "All player analyses failed"));
+        return;
       }
-      toast.success(`Match analyzed · ${created.length} player${created.length > 1 ? "s" : ""}`);
-      // Land on the first player's session detail. Sessions list will show
-      // the match badge so the user can see all 4 from there.
-      nav(`/app/sessions/${created[0].id}`);
+      if (failed.length > 0) {
+        toast.warning(
+          `Match saved with ${created.length}/${players.length} players — ${failed.length} failed. ${
+            errMsg(failed[0]?.reason, "")
+          }`
+        );
+      } else {
+        toast.success(
+          `Match analyzed · ${created.length} player${
+            created.length > 1 ? "s" : ""
+          }`
+        );
+      }
+      // Land on the new Match Overview page so the user sees ALL player
+      // cards at once — not just P1.
+      nav(`/app/matches/${matchId}`);
     } catch (err) {
       toast.error(errMsg(err, "Failed to analyze match"));
     } finally {
