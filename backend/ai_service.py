@@ -1,4 +1,8 @@
-"""AI service: motion form analysis & training plan generation via GPT-5.2."""
+"""AI service: motion form analysis & training plan generation.
+
+The current LLM model is configured via MODEL_PROVIDER/MODEL_NAME below; swap
+freely without touching the rest of the codebase or any UI surface.
+"""
 import json
 import logging
 import os

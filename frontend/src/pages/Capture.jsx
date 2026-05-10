@@ -375,7 +375,7 @@ export default function Capture() {
                       AI analyzing biomechanics…
                     </p>
                     <p className="mt-1 text-xs text-zinc-500 font-mono">
-                      gpt-5.2 · elite benchmark comparison
+                      elite benchmark comparison
                     </p>
                   </div>
                 </div>

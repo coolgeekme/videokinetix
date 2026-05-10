@@ -1,6 +1,6 @@
 """VisionKinetix.ai backend API tests.
 
-Covers: auth, sports, sessions (with live GPT-5.2 form analysis),
+Covers: auth, sports, sessions (with live LLM form analysis),
 training plans, dashboard stats, goals, and cross-user isolation.
 """
 import os
@@ -23,7 +23,7 @@ if not BASE_URL:
 assert BASE_URL, "REACT_APP_BACKEND_URL not configured"
 API = f"{BASE_URL}/api"
 
-# Generous timeouts since GPT-5.2 is called live (may take 5-30s)
+# Generous timeouts since the LLM is called live (may take 5-30s)
 LLM_TIMEOUT = 90
 DEFAULT_TIMEOUT = 30
 
@@ -220,7 +220,7 @@ class TestSports:
             assert {"id", "name", "tagline", "color", "icon"}.issubset(s.keys())
 
 
-# ---------- Sessions (live GPT-5.2) ----------
+# ---------- Sessions (live LLM) ----------
 class TestSessions:
     def test_create_session_runs_form_analysis(self, alpha_session):
         s = alpha_session
@@ -288,7 +288,7 @@ class TestSessionIsolation:
         assert r.json()["sessions"] == []
 
 
-# ---------- Training plan (live GPT-5.2) ----------
+# ---------- Training plan (live LLM) ----------
 class TestTrainingPlan:
     def test_generate_plan(self, session, user_a, alpha_session):
         sid = alpha_session["id"]
@@ -479,7 +479,7 @@ class TestGoals:
         assert r.json()["goals"] == []
 
 
-# ---------- NEW: Basketball shot_outcomes / makes_vs_misses (live GPT-5.2) ----------
+# ---------- NEW: Basketball shot_outcomes / makes_vs_misses (live LLM) ----------
 class TestShotOutcomes:
     """Verifies the new ball-trajectory + hoop-ROI outcome correlation pipeline."""
 

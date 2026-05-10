@@ -3,7 +3,7 @@ import axios from "axios";
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 export const API = `${BACKEND_URL}/api`;
 
-// Generous default timeout — analyze_form (GPT-5.2) takes ~15-25s; mobile
+// Generous default timeout — analyze_form (LLM) takes ~15-25s; mobile
 // networks add latency. iOS Safari cancels stalled XHRs aggressively, so we
 // pad heavily here. Individual callers can override per-request.
 export const api = axios.create({ baseURL: API, timeout: 120000 });

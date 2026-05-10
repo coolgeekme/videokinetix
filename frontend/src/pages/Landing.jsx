@@ -191,7 +191,7 @@ export default function Landing() {
           <div className="grid md:grid-cols-3 gap-px bg-white/10 border border-white/10">
             {[
               { n: "01", t: "Capture", d: "Stand in front of your webcam. We map 33 joints in real time using markerless motion capture.", I: Camera },
-              { n: "02", t: "Analyze", d: "GPT-5.2 compares your biomechanics to elite athlete benchmarks for your sport.", I: Brain },
+              { n: "02", t: "Analyze", d: "Our AI compares your biomechanics to elite athlete benchmarks for your sport.", I: Brain },
               { n: "03", t: "Improve", d: "Get a 7-day personalized plan with drills, cues, and milestones tailored to you.", I: Target },
             ].map((step) => (
               <div key={step.n} className="bg-[#0a0a0a] p-8 sm:p-10 hover:bg-[#121212] transition-colors">
