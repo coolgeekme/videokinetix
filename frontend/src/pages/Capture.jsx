@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { api, errMsg } from "@/lib/api";
 import SportPicker from "@/components/SportPicker";
 import PoseCanvas from "@/components/PoseCanvas";
+import MultiPlayerPoseCanvas from "@/components/MultiPlayerPoseCanvas";
 import TrimSlider from "@/components/TrimSlider";
 import { Upload, Camera, Loader2, ArrowRight, User } from "lucide-react";
 import { toast } from "sonner";
@@ -45,6 +46,7 @@ export default function Capture() {
   const [sports, setSports] = useState([]);
   const [sport, setSport] = useState(params.get("sport") || null);
   const [mode, setMode] = useState("live");
+  const [matchMode, setMatchMode] = useState(false); // pickleball doubles only
   const [videoSrc, setVideoSrc] = useState(null);
   const [notes, setNotes] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -119,6 +121,47 @@ export default function Capture() {
       nav(`/app/sessions/${data.id}`);
     } catch (err) {
       toast.error(errMsg(err, "Failed to analyze session"));
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const handleMatchStop = async ({ players }) => {
+    if (!sport || !athleteId) return;
+    if (!players?.length) {
+      toast.error("No players were tracked.");
+      return;
+    }
+    setAnalyzing(true);
+    // One UUID groups all per-player sessions for this match.
+    const matchId = (window.crypto?.randomUUID && window.crypto.randomUUID()) ||
+                    `m-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    try {
+      const created = [];
+      for (const p of players) {
+        const summary = p.analysis;
+        if (!summary || (summary.rep_count ?? 0) === 0) {
+          // Still create the session so the user can see "no reps detected"
+          // for that slot rather than silently dropping it.
+        }
+        const { data } = await api.post("/sessions", {
+          athlete_id: athleteId,
+          sport,
+          mode,
+          duration_seconds: p.duration_seconds,
+          pose_summary: summary,
+          notes: (notes.trim() ? `${notes.trim()} · ` : "") + `Player ${p.slot + 1} (match)`,
+          match_id: matchId,
+          player_slot: p.slot + 1,
+        });
+        created.push(data);
+      }
+      toast.success(`Match analyzed · ${created.length} player${created.length > 1 ? "s" : ""}`);
+      // Land on the first player's session detail. Sessions list will show
+      // the match badge so the user can see all 4 from there.
+      nav(`/app/sessions/${created[0].id}`);
+    } catch (err) {
+      toast.error(errMsg(err, "Failed to analyze match"));
     } finally {
       setAnalyzing(false);
     }
@@ -344,16 +387,57 @@ export default function Capture() {
                 </div>
               </div>
 
-              <PoseCanvas
-                key={`${mode}-${videoSrc || "live"}-${athleteId}-${sport}`}
-                mode={mode}
-                videoSrc={videoSrc}
-                sport={sport}
-                athleteId={athleteId}
-                trimStart={trim[0]}
-                trimEnd={trim[1] || null}
-                onStop={handleStop}
-              />
+              {/* Pickleball: solo vs doubles match toggle */}
+              {sport === "pickleball" && (
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMatchMode(false)}
+                    data-testid="match-mode-solo-btn"
+                    className={`flex-1 py-2.5 px-3 border text-[10px] uppercase tracking-widest font-display font-bold transition-colors ${
+                      !matchMode
+                        ? "border-[#ff3b30] bg-[#ff3b30]/15 text-white"
+                        : "border-white/10 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    Solo · 1 player
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMatchMode(true)}
+                    data-testid="match-mode-doubles-btn"
+                    className={`flex-1 py-2.5 px-3 border text-[10px] uppercase tracking-widest font-display font-bold transition-colors ${
+                      matchMode
+                        ? "border-[#00e5ff] bg-[#00e5ff]/15 text-white"
+                        : "border-white/10 text-zinc-400 hover:text-white"
+                    }`}
+                  >
+                    Doubles match · up to 4 players
+                  </button>
+                </div>
+              )}
+
+              {matchMode && sport === "pickleball" ? (
+                <MultiPlayerPoseCanvas
+                  key={`mp-${mode}-${videoSrc || "live"}-${athleteId}`}
+                  mode={mode}
+                  videoSrc={videoSrc}
+                  sport={sport}
+                  trimStart={trim[0]}
+                  onStop={handleMatchStop}
+                />
+              ) : (
+                <PoseCanvas
+                  key={`${mode}-${videoSrc || "live"}-${athleteId}-${sport}`}
+                  mode={mode}
+                  videoSrc={videoSrc}
+                  sport={sport}
+                  athleteId={athleteId}
+                  trimStart={trim[0]}
+                  trimEnd={trim[1] || null}
+                  onStop={handleStop}
+                />
+              )}
 
               {mode === "upload" && videoDuration > 0 && (
                 <TrimSlider

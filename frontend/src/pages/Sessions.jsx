@@ -150,6 +150,15 @@ export default function Sessions() {
                   <div>
                     <div className="font-display uppercase tracking-tight font-bold text-lg capitalize">
                       {s.sport}
+                      {s.match_id && s.player_slot && (
+                        <span
+                          className="ml-2 text-[10px] font-mono uppercase tracking-widest border border-[#00e5ff]/50 text-[#00e5ff] px-1.5 py-0.5 align-middle"
+                          data-testid={`match-badge-${s.id}`}
+                          title={`Doubles match · player ${s.player_slot}`}
+                        >
+                          MATCH · P{s.player_slot}
+                        </span>
+                      )}
                       {a && (
                         <span className="ml-3 text-sm text-zinc-400">
                           · {a.name}
