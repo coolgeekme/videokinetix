@@ -693,15 +693,15 @@ function VideoReplayCard({
 }) {
   const hasRaw = videos.some((v) => v.variant === "raw");
   const hasOverlay = videos.some((v) => v.variant === "overlay");
-  const active = videos.find((v) => v.variant === variant);
   // If user picked a variant that doesn't exist, fall back to whichever is available.
-  const effectiveVariant = active
+  const effectiveVariant = videos.some((v) => v.variant === variant)
     ? variant
     : hasOverlay
       ? "overlay"
       : hasRaw
         ? "raw"
         : null;
+  const active = videos.find((v) => v.variant === effectiveVariant);
   const token =
     typeof window !== "undefined" ? localStorage.getItem("kinetic_token") : null;
   const src = effectiveVariant

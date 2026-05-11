@@ -16,6 +16,19 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Implemented (Feb 2026 – v1.4 Save + Replay Captured Video — Phase C)
+- **Emergent object storage integration**: `backend/storage.py` wraps the Emergent objstore API (init_storage at startup, put_object/get_object with 403→re-init retry). All videos prefixed `visionkinetix/videos/{user_id}/{session_id}/`.
+- **Endpoints**:
+  - `POST /api/sessions/{id}/video` (multipart `variant` + `file`) — uploads raw or overlay variant, validates MIME (mp4/webm/etc.), 80MB cap, soft-deletes prior copy of same variant.
+  - `GET /api/sessions/{id}/videos` — list latest stored videos for the session.
+  - `GET /api/sessions/{id}/video/{variant}` — streams binary; supports `?auth=<jwt>` query fallback for `<video src>` tags (added to `auth.get_current_user_id`).
+  - `DELETE /api/sessions/{id}/video/{variant}` — soft-delete.
+  - `POST /api/sessions/{id}/reanalyze` — re-runs LLM analysis on stored `pose_summary`.
+  - `DELETE /api/sessions/{id}` now cascade soft-deletes the session's videos.
+- **Frontend Capture**: opt-in checkbox "Save video for replay" (default off, `data-testid="save-video-toggle"`). When on, `PoseCanvas` spins up two `MediaRecorder` instances — one on `canvas.captureStream()` of a hidden composite canvas (video + skeleton drawn each frame) for the overlay variant, one on the webcam `MediaStream` for the raw variant (live mode). Uploaded-video mode re-uploads the original `File` as the raw variant. Best-effort upload after session creation.
+- **Frontend SessionDetail**: `VideoReplayCard` renders an HTML5 `<video>` player with variant tabs (skeleton overlay / raw) when both exist, a **Re-analyze** button (idempotent LLM rerun on stored pose data), and per-variant delete.
+- **Tested**: backend 16/16 pytest pass (`/app/backend/tests/test_videos.py`). Frontend UI validated.
+
 ## Implemented (Feb 2026 – v1.3 Theming + PDF Export)
 - **Light/Dark theme toggle**: `useTheme` hook with module-level state + subscribers (cross-component sync), preference saved in `localStorage` under `vk_theme`. OS preference respected on first visit. Toggle button (Sun/Moon icon, `data-testid="theme-toggle"`) lives in the Landing header and AppShell header. Light mode is delivered via `html.light` overrides in `index.css` that flip hardcoded `bg-[#0a0a0a]`, `text-white`, `border-white/10`, etc. Red CTAs explicitly retain white text.
 - **PDF export for reports**: `lib/pdfExport.js` uses `html2canvas` + `jspdf` to snapshot the SessionDetail or MatchDetail `reportRef` node into a multi-page A4 PDF. Forces a dark snapshot regardless of current theme. Buttons: `data-testid="download-pdf-btn"` on SessionDetail, `data-testid="download-match-pdf-btn"` on MatchDetail. 50ms yield ensures the "Building PDF" spinner renders before html2canvas blocks the main thread.
