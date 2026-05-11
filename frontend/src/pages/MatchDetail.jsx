@@ -1,7 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { Loader2, ArrowRight, Users } from "lucide-react";
+import { Loader2, ArrowRight, Users, FileDown } from "lucide-react";
 import { api, errMsg } from "@/lib/api";
+import { exportNodeToPdf, pdfFilename } from "@/lib/pdfExport";
+import { toast } from "sonner";
 
 const PLAYER_COLORS = ["#ff3b30", "#00e5ff", "#ffd166", "#00ff88"];
 
@@ -10,6 +12,27 @@ export default function MatchDetail() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const reportRef = useRef(null);
+
+  const downloadPdf = async () => {
+    if (!reportRef.current) return;
+    setExportingPdf(true);
+    try {
+      const filename = pdfFilename(
+        "visionkinetix",
+        "match",
+        matchId?.slice(0, 8) || "report",
+      );
+      await exportNodeToPdf(reportRef.current, filename);
+      toast.success("Match report downloaded");
+    } catch (err) {
+      console.error("PDF export error", err);
+      toast.error("Failed to export PDF");
+    } finally {
+      setExportingPdf(false);
+    }
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -63,21 +86,23 @@ export default function MatchDetail() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <div className="text-[11px] uppercase tracking-widest text-[#00e5ff] font-display font-bold flex items-center gap-2">
-          <Users className="w-3.5 h-3.5" />
-          Doubles match · {sessions.length} player{sessions.length !== 1 ? "s" : ""}
-        </div>
-        <h1 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-5xl mt-1">
-          Match analysis
-        </h1>
-        <p className="mt-2 text-xs text-zinc-500 font-mono">
-          match_id: {matchId}
-        </p>
-      </div>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div ref={reportRef} className="space-y-6 flex-1 min-w-0">
+          <div>
+            <div className="text-[11px] uppercase tracking-widest text-[#00e5ff] font-display font-bold flex items-center gap-2">
+              <Users className="w-3.5 h-3.5" />
+              Doubles match · {sessions.length} player{sessions.length !== 1 ? "s" : ""}
+            </div>
+            <h1 className="font-display font-black uppercase tracking-tighter text-3xl sm:text-5xl mt-1">
+              Match analysis
+            </h1>
+            <p className="mt-2 text-xs text-zinc-500 font-mono">
+              match_id: {matchId}
+            </p>
+          </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4" data-testid="match-player-grid">
-        {sessions.map((s) => {
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4" data-testid="match-player-grid">
+            {sessions.map((s) => {
           const color = PLAYER_COLORS[(s.player_slot ?? 1) - 1] || "#ff3b30";
           const score = s.form_score ?? s.pose_summary?.overall_score ?? 0;
           const a = s.analysis || {};
@@ -189,6 +214,26 @@ export default function MatchDetail() {
             </Link>
           );
         })}
+      </div>
+        </div>
+        <div className="md:w-auto md:pt-2">
+          <button
+            data-testid="download-match-pdf-btn"
+            onClick={downloadPdf}
+            disabled={exportingPdf}
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-200 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 transition-colors disabled:opacity-40"
+          >
+            {exportingPdf ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Building PDF
+              </>
+            ) : (
+              <>
+                <FileDown className="w-4 h-4" /> Download PDF
+              </>
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

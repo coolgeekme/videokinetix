@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { errMsg } from "@/lib/api";
-import { ChevronLeft, Sparkles, Loader2, Trash2 } from "lucide-react";
+import { ChevronLeft, Sparkles, Loader2, Trash2, FileDown } from "lucide-react";
 import { toast } from "sonner";
+import { exportNodeToPdf, pdfFilename } from "@/lib/pdfExport";
 
 const SEVERITY = {
   high: "#ff3b30",
@@ -21,6 +22,31 @@ export default function SessionDetail() {
   const [generating, setGenerating] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deletingPlan, setDeletingPlan] = useState(false);
+  const [exportingPdf, setExportingPdf] = useState(false);
+  const reportRef = useRef(null);
+
+  const downloadPdf = async () => {
+    if (!reportRef.current) return;
+    setExportingPdf(true);
+    try {
+      const dateStr = new Date(session.created_at || Date.now())
+        .toISOString()
+        .slice(0, 10);
+      const filename = pdfFilename(
+        "visionkinetix",
+        session.sport,
+        athlete?.name || "session",
+        dateStr,
+      );
+      await exportNodeToPdf(reportRef.current, filename);
+      toast.success("Report downloaded");
+    } catch (err) {
+      console.error("PDF export error", err);
+      toast.error("Failed to export PDF");
+    } finally {
+      setExportingPdf(false);
+    }
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -136,17 +162,35 @@ export default function SessionDetail() {
         >
           <ChevronLeft className="w-4 h-4" /> All sessions
         </Link>
-        <button
-          data-testid="delete-session-btn"
-          onClick={deleteSession}
-          disabled={deleting}
-          className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-[#ff3b30] border border-white/10 hover:border-[#ff3b30]/40 px-3 py-1.5 transition-colors disabled:opacity-40"
-        >
-          <Trash2 className="w-4 h-4" /> Delete session
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            data-testid="download-pdf-btn"
+            onClick={downloadPdf}
+            disabled={exportingPdf}
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-200 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 transition-colors disabled:opacity-40"
+          >
+            {exportingPdf ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" /> Building PDF
+              </>
+            ) : (
+              <>
+                <FileDown className="w-4 h-4" /> Download PDF
+              </>
+            )}
+          </button>
+          <button
+            data-testid="delete-session-btn"
+            onClick={deleteSession}
+            disabled={deleting}
+            className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-400 hover:text-[#ff3b30] border border-white/10 hover:border-[#ff3b30]/40 px-3 py-1.5 transition-colors disabled:opacity-40"
+          >
+            <Trash2 className="w-4 h-4" /> Delete session
+          </button>
+        </div>
       </div>
 
-      <div className="grid lg:grid-cols-3 gap-6">
+      <div ref={reportRef} className="grid lg:grid-cols-3 gap-6">
         <div className="lg:col-span-1 bg-[#121212] border border-white/10 p-6">
           <div className="text-[11px] uppercase tracking-widest text-zinc-400 font-display font-bold">
             Form score

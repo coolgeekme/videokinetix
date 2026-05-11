@@ -1,0 +1,65 @@
+{
+  "summary": "Frontend testing of (1) theme toggle on landing + AppShell, and (2) PDF export on SessionDetail + MatchDetail. Landing toggle works, persists in localStorage 'vk_theme', and html.light/dark class applied. AppShell toggle works and theme persists across /app/dashboard <-> /app/sessions navigation. Session PDF and Match PDF downloads succeed with correct filename format (visionkinetix-*.pdf) and non-trivial size (295KB session, 52KB match). Regression flows (sessions list, athletes list) load fine. Two issues identified: the 'Building PDF' loading label/spinner never renders visibly because html2canvas blocks the main thread before React commits the loading state, and the landing page light-mode hero has low-contrast headings/buttons because some hardcoded Tailwind utilities (text-white, bg-[#ff3b30] children) are not properly inverted.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "SessionDetail / MatchDetail download-pdf-btn",
+        "issue": "Button label stays 'DOWNLOAD PDF' and spinner never appears during export. setExportingPdf(true) is set but html2canvas synchronously blocks the main thread before React flushes the new state, so the 'Building PDF' UI is never visible to users. Fix: yield to the event loop after setExportingPdf(true) (e.g. `await new Promise(r => setTimeout(r, 50))` before calling exportNodeToPdf), or move the heavy work into a microtask/requestIdleCallback so React can commit first.",
+        "selector": "[data-testid=\"download-pdf-btn\"], [data-testid=\"download-match-pdf-btn\"]",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "Landing.jsx (light mode)",
+        "issue": "Hero headline 'TRAIN LIKE THE / DATA NEVER LIES.', primary CTA 'START TRAINING FREE', and top-nav links (SPORTS / HOW IT WORKS / FEATURES / SIGN IN / SEE IT WORK) are very low contrast on white in light mode. Looks like several hardcoded Tailwind hex classes (e.g. text-white, bg-[#ff3b30] with white-on-red, gray-on-white nav links) are not overridden in html.light. Functional but visually broken.",
+        "selector": "Landing.jsx top section",
+        "priority": "MEDIUM"
+      },
+      {
+        "component": "Match PDF filename",
+        "issue": "MatchDetail uses matchId.slice(0,8) -> 'TEST-mat' so two matches with the same 8-char prefix collide. Consider using full matchId (sanitised) or a date suffix.",
+        "selector": "src/pages/MatchDetail.jsx downloadPdf",
+        "priority": "LOW"
+      },
+      {
+        "component": "Pre-existing console hydration warning",
+        "issue": "React DOM warning: '<a> cannot contain a nested <a>'. Not caused by this feature but surfaces on dashboard pages. Unrelated regression — flagging for cleanup.",
+        "selector": "n/a",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {
+        "screen": "Landing (light mode)",
+        "issues": [
+          "Hero heading washed out / low contrast on white background",
+          "Primary red CTA 'START TRAINING FREE' has illegible label",
+          "Top-nav links blend into background (gray-on-white)"
+        ]
+      }
+    ]
+  },
+  "test_report_links": ["/tmp/seed_pdf.py"],
+  "action_items": [
+    "Make the 'Building PDF' loading state actually visible: yield to event loop (e.g. setTimeout 50ms or rAF) after setExportingPdf(true) before invoking html2canvas in both SessionDetail.downloadPdf and MatchDetail.downloadPdf.",
+    "Audit Landing.jsx for hardcoded text-white / bg-[#...] / text-zinc-* utilities and add matching html.light overrides in index.css so hero text, primary CTA, and nav links remain readable in light mode.",
+    "(Optional) Use full sanitised matchId (or a date suffix) instead of matchId.slice(0,8) so PDF filenames are unique.",
+    "(Optional, pre-existing) Fix nested <Link>/<a> in dashboard area to remove React hydration warning."
+  ],
+  "critical_code_review_comments": [
+    "lib/theme.js: clean module-level pub/sub pattern, correct localStorage key 'vk_theme', SSR-safe guards — looks good.",
+    "lib/pdfExport.js: html2canvas is invoked synchronously after one rAF tick which is not enough to let React commit the loading state (origin of the 'Building PDF' label never rendering). Recommend an extra setTimeout(0) AFTER state update inside the caller, OR move setExportingPdf into the export util via a callback. Also html2canvas force-removes html.light during snapshot which is correct — but it could fail to re-add the class if exception is thrown before the try/finally (verified: try/finally restores it correctly).",
+    "SessionDetail.jsx (~624 lines) and MatchDetail.jsx are getting large; consider extracting PlanView / KeyframeCard / player-card to separate components for readability.",
+    "MatchDetail.jsx uses `matchId.slice(0,8)` for filename — fragile against collisions.",
+    "Pre-existing: nested <a> warning still emitted — unrelated to this feature."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not tested (per request)", "frontend": "core flows pass; 2 medium UI issues"},
+  "test_credentials": "athlete@example.com / Pass1234! (already registered)",
+  "seed_data_creation": "Created 3 pickleball sessions for athlete f4587447-a18e-4a88-a768-e130b90508ed: 1 standalone (id=3010da3b-20fd-40e5-aca1-3da28a5c1b58), 2 sharing match_id='TEST-match-pdf-1' (player_slot 1 & 2). All prefixed TEST_ in notes.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Theme toggle + PDF download core flows verified via Playwright + page.expect_download(). Seed sessions persist under athlete@example.com (3 sessions, 1 match). The 'Building PDF' loading state is the only functional regression vs spec — caused by html2canvas blocking before React commits. Light-mode contrast on Landing is the only design regression. Backend was not retested (frontend-only request).",
+  "rca of the issue": "1) 'Building PDF' label invisible — exportNodeToPdf calls html2canvas inside the same microtask as setExportingPdf(true); only `await new Promise(r => requestAnimationFrame(() => r()))` separates them, which is not always enough for React to flush a state-driven re-render before html2canvas begins its blocking canvas work. Fix by yielding longer (setTimeout 50ms) or by setting the state then `await new Promise(r=>setTimeout(r,0))` BEFORE calling exportNodeToPdf in both SessionDetail and MatchDetail. 2) Landing light-mode contrast — Landing.jsx still uses hardcoded `text-white`/`text-zinc-400` and red CTA backgrounds; index.css `html.light` overrides cover many but not all of these utilities. Need to extend the override list (text-white -> text-zinc-900 in light, text-zinc-400 -> text-zinc-600, etc.) specifically for Landing surfaces."
+}
