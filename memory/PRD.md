@@ -16,6 +16,10 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Implemented (Feb 2026 – v1.3 Theming + PDF Export)
+- **Light/Dark theme toggle**: `useTheme` hook with module-level state + subscribers (cross-component sync), preference saved in `localStorage` under `vk_theme`. OS preference respected on first visit. Toggle button (Sun/Moon icon, `data-testid="theme-toggle"`) lives in the Landing header and AppShell header. Light mode is delivered via `html.light` overrides in `index.css` that flip hardcoded `bg-[#0a0a0a]`, `text-white`, `border-white/10`, etc. Red CTAs explicitly retain white text.
+- **PDF export for reports**: `lib/pdfExport.js` uses `html2canvas` + `jspdf` to snapshot the SessionDetail or MatchDetail `reportRef` node into a multi-page A4 PDF. Forces a dark snapshot regardless of current theme. Buttons: `data-testid="download-pdf-btn"` on SessionDetail, `data-testid="download-match-pdf-btn"` on MatchDetail. 50ms yield ensures the "Building PDF" spinner renders before html2canvas blocks the main thread.
+
 ## Implemented (Feb 2026 – v1.2 Basketball Make/Miss Tracking)
 - **MediaPipe Object Detector integration**: ball-tracking via `efficientdet_lite0` model (Apache 2.0, browser-side, free). Loaded lazily for basketball sport only, runs at half framerate for performance.
 - **Tap-to-place hoop ROI**: After locking the athlete, basketball capture prompts "Step 2/2 · Tap the rim to place the hoop". Cyan dashed rectangle marks the hoop region. Reposition button available pre-recording.

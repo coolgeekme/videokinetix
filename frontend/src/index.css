@@ -71,6 +71,17 @@ html.light .border-white\/20 { border-color: #d1d5db !important; }
 html.light .border-white\/30 { border-color: #9ca3af !important; }
 html.light .border-zinc-700 { border-color: #d4d4d8 !important; }
 html.light .border-zinc-800 { border-color: var(--border) !important; }
+/* Keep white text on accent backgrounds (red CTA, brand logo box, etc.) */
+html.light .bg-\[\#ff3b30\],
+html.light .bg-\[\#ff3b30\] .text-white,
+html.light .bg-\[\#ff3b30\] .font-display,
+html.light .bg-\[\#ff3b30\] span,
+html.light .hover\:bg-\[\#ff5c53\]:hover { color: #ffffff !important; }
+html.light a.bg-\[\#ff3b30\],
+html.light button.bg-\[\#ff3b30\] { color: #ffffff !important; }
+/* Soften ghost / outline buttons that hover into white tint */
+html.light .hover\:bg-white\/5:hover { background-color: rgba(0,0,0,0.04) !important; }
+html.light .hover\:bg-white\/10:hover { background-color: rgba(0,0,0,0.06) !important; }
 /* Divides */
 html.light .divide-white\/5 > * + * { border-color: rgba(0,0,0,0.06) !important; }
 html.light .divide-white\/10 > * + * { border-color: var(--border) !important; }
@@ -223,6 +234,9 @@ body {
 .stroke-text {
     -webkit-text-stroke: 1px rgba(255, 255, 255, 0.16);
     color: transparent;
+}
+html.light .stroke-text {
+    -webkit-text-stroke: 1px rgba(0, 0, 0, 0.18);
 }
 
 /* Custom scrollbar (subtle) */

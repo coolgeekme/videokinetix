@@ -28,6 +28,8 @@ export default function SessionDetail() {
   const downloadPdf = async () => {
     if (!reportRef.current) return;
     setExportingPdf(true);
+    // Let React flush the loading state before html2canvas blocks the main thread
+    await new Promise((r) => setTimeout(r, 50));
     try {
       const dateStr = new Date(session.created_at || Date.now())
         .toISOString()

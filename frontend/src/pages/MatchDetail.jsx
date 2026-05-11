@@ -18,11 +18,13 @@ export default function MatchDetail() {
   const downloadPdf = async () => {
     if (!reportRef.current) return;
     setExportingPdf(true);
+    // Let React flush the loading state before html2canvas blocks the main thread
+    await new Promise((r) => setTimeout(r, 50));
     try {
       const filename = pdfFilename(
         "visionkinetix",
         "match",
-        matchId?.slice(0, 8) || "report",
+        matchId || "report",
       );
       await exportNodeToPdf(reportRef.current, filename);
       toast.success("Match report downloaded");
