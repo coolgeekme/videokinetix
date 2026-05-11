@@ -49,10 +49,12 @@ export default function Capture() {
   const [mode, setMode] = useState("live");
   const [matchMode, setMatchMode] = useState(false); // pickleball doubles only
   const [videoSrc, setVideoSrc] = useState(null);
+  const [videoFile, setVideoFile] = useState(null); // Phase C: keep ref for re-upload
   const [notes, setNotes] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
   const [trim, setTrim] = useState([0, 0]);
+  const [saveVideo, setSaveVideo] = useState(false);
   const fileRef = useRef(null);
   const nav = useNavigate();
 
@@ -81,6 +83,7 @@ export default function Capture() {
     }
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
+    setVideoFile(file);
     setMode("upload");
     setVideoDuration(0);
     setTrim([0, 0]);
@@ -106,7 +109,61 @@ export default function Capture() {
     }
   };
 
-  const handleStop = async (summary) => {
+  const uploadSessionVideos = async (sessionId, blobs) => {
+    if (!saveVideo) return;
+    const uploads = [];
+    // Overlay variant from MediaRecorder (canvas captureStream)
+    if (blobs?.videoBlobs?.overlay) {
+      const fd = new FormData();
+      const ext = (blobs.videoBlobs.overlay.type || "video/webm").includes("mp4")
+        ? "mp4"
+        : "webm";
+      fd.append("variant", "overlay");
+      fd.append(
+        "file",
+        new File([blobs.videoBlobs.overlay], `overlay.${ext}`, {
+          type: blobs.videoBlobs.overlay.type || "video/webm",
+        }),
+      );
+      uploads.push(
+        api.post(`/sessions/${sessionId}/video`, fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: 120000,
+        }),
+      );
+    }
+    // Raw variant: live → MediaRecorder blob, upload → original File
+    let rawBlob = blobs?.videoBlobs?.raw;
+    let rawType = rawBlob?.type;
+    if (!rawBlob && mode === "upload" && videoFile) {
+      rawBlob = videoFile;
+      rawType = videoFile.type;
+    }
+    if (rawBlob) {
+      const fd = new FormData();
+      const ext = (rawType || "").includes("mp4") ? "mp4" : "webm";
+      fd.append("variant", "raw");
+      fd.append(
+        "file",
+        rawBlob instanceof File
+          ? rawBlob
+          : new File([rawBlob], `raw.${ext}`, { type: rawType || "video/webm" }),
+      );
+      uploads.push(
+        api.post(`/sessions/${sessionId}/video`, fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: 180000,
+        }),
+      );
+    }
+    try {
+      await Promise.allSettled(uploads);
+    } catch {
+      /* non-fatal; session is still created */
+    }
+  };
+
+  const handleStop = async (summary, extras) => {
     if (!sport || !athleteId) return;
     setAnalyzing(true);
     try {
@@ -118,6 +175,15 @@ export default function Capture() {
         pose_summary: summary,
         notes: notes.trim() || null,
       });
+      // Phase C: upload video blobs (best-effort, doesn't block navigation on failure)
+      if (saveVideo) {
+        try {
+          await uploadSessionVideos(data.id, extras);
+        } catch (e) {
+          console.warn("Video upload failed", e);
+          toast.warning("Analysis saved, but video upload failed");
+        }
+      }
       toast.success("Analysis complete");
       nav(`/app/sessions/${data.id}`);
     } catch (err) {
@@ -460,8 +526,38 @@ export default function Capture() {
                   athleteId={athleteId}
                   trimStart={trim[0]}
                   trimEnd={trim[1] || null}
+                  saveVideo={saveVideo && !matchMode}
                   onStop={handleStop}
                 />
+              )}
+
+              {/* Phase C: opt-in to save the recorded video for replay later.
+                  Default off because videos can be large. Disabled in doubles
+                  match mode (too many streams), and on uploads we re-upload
+                  the original file as the "raw" variant. */}
+              {!matchMode && (
+                <label
+                  className="flex items-start gap-3 p-3 border border-white/10 bg-[#0f0f0f] hover:border-white/20 transition-colors cursor-pointer"
+                  data-testid="save-video-toggle"
+                >
+                  <input
+                    type="checkbox"
+                    checked={saveVideo}
+                    onChange={(e) => setSaveVideo(e.target.checked)}
+                    className="mt-1 accent-[#ff3b30]"
+                    data-testid="save-video-checkbox"
+                  />
+                  <div className="flex-1">
+                    <div className="text-[11px] uppercase tracking-widest text-zinc-200 font-display font-bold">
+                      Save video for replay
+                    </div>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      Stores the raw clip plus a skeleton-overlay version so you
+                      can review this session later. Off by default (videos can
+                      take a few MB per minute).
+                    </p>
+                  </div>
+                </label>
               )}
 
               {mode === "upload" && videoDuration > 0 && (

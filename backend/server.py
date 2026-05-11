@@ -8,10 +8,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query
+from fastapi import APIRouter, Depends, FastAPI, File, Form, HTTPException, Query, Response, UploadFile
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from starlette.middleware.cors import CORSMiddleware
+import requests
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / ".env")
@@ -23,6 +24,12 @@ from auth import (  # noqa: E402
     verify_password,
 )
 from ai_service import analyze_form, generate_training_plan  # noqa: E402
+from storage import (  # noqa: E402
+    build_video_path,
+    get_object,
+    init_storage,
+    put_object,
+)
 
 # ---------- DB ----------
 mongo_url = os.environ["MONGO_URL"]
@@ -465,7 +472,189 @@ async def delete_session(session_id: str, user_id: str = Depends(get_current_use
     if res.deleted_count == 0:
         raise HTTPException(404, "Session not found")
     await db.training_plans.delete_many({"session_id": session_id, "user_id": user_id})
+    # Soft-delete any stored videos for this session
+    await db.session_videos.update_many(
+        {"session_id": session_id, "user_id": user_id},
+        {"$set": {"is_deleted": True}},
+    )
     return {"deleted": True, "id": session_id}
+
+
+@api.post("/sessions/{session_id}/reanalyze")
+async def reanalyze_session(
+    session_id: str, user_id: str = Depends(get_current_user_id)
+):
+    """Re-run AI form analysis on this session's stored pose summary.
+
+    The pose data is preserved (we only re-prompt the LLM) so this is cheap
+    and idempotent — useful when prompts/models are updated, or when the
+    user has tweaked notes.
+    """
+    s = await db.sessions.find_one({"id": session_id, "user_id": user_id}, {"_id": 0})
+    if not s:
+        raise HTTPException(404, "Session not found")
+    pose_summary = s.get("pose_summary") or {}
+    analysis = await analyze_form(s["sport"], pose_summary, notes=s.get("notes"))
+    update = {
+        "analysis": analysis,
+        "form_score": int(analysis.get("form_score", 70)),
+    }
+    await db.sessions.update_one({"id": session_id, "user_id": user_id}, {"$set": update})
+    return update
+
+
+# ---------- Session videos (Phase C) ----------
+MAX_VIDEO_BYTES = 80 * 1024 * 1024  # 80MB hard cap per file
+ALLOWED_VIDEO_MIMES = {
+    "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
+    "video/ogg", "application/octet-stream",
+}
+VARIANT_RAW = "raw"
+VARIANT_OVERLAY = "overlay"
+
+
+def _video_public(v: dict) -> dict:
+    """Strip storage-internal fields before returning to the client."""
+    return {
+        "id": v["id"],
+        "session_id": v["session_id"],
+        "variant": v["variant"],
+        "size": v.get("size", 0),
+        "content_type": v.get("content_type", "video/webm"),
+        "url": f"/api/sessions/{v['session_id']}/video/{v['variant']}",
+        "created_at": v.get("created_at"),
+    }
+
+
+@api.post("/sessions/{session_id}/video")
+async def upload_session_video(
+    session_id: str,
+    variant: str = Form(...),
+    file: UploadFile = File(...),
+    user_id: str = Depends(get_current_user_id),
+):
+    """Persist a session video (raw recorded or skeleton-overlay variant)."""
+    if variant not in (VARIANT_RAW, VARIANT_OVERLAY):
+        raise HTTPException(400, "variant must be 'raw' or 'overlay'")
+    session = await db.sessions.find_one(
+        {"id": session_id, "user_id": user_id}, {"_id": 0, "id": 1}
+    )
+    if not session:
+        raise HTTPException(404, "Session not found")
+
+    content_type = (file.content_type or "video/webm").split(";")[0].strip()
+    if content_type not in ALLOWED_VIDEO_MIMES:
+        raise HTTPException(415, f"Unsupported media type: {content_type}")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_VIDEO_BYTES:
+        raise HTTPException(413, f"File exceeds {MAX_VIDEO_BYTES // (1024 * 1024)}MB limit")
+
+    ext = (file.filename.split(".")[-1] if file.filename and "." in file.filename else "webm")
+    storage_path = build_video_path(user_id, session_id, variant, ext)
+    try:
+        result = put_object(storage_path, data, content_type)
+    except requests.HTTPError as e:  # noqa: F821 — requests imported below
+        logger.error("Storage upload failed: %s", e)
+        raise HTTPException(502, "Storage upload failed") from e
+
+    # Soft-delete any prior video for this session+variant so list/get returns the latest only.
+    await db.session_videos.update_many(
+        {"session_id": session_id, "user_id": user_id, "variant": variant, "is_deleted": False},
+        {"$set": {"is_deleted": True}},
+    )
+    video_id = str(uuid.uuid4())
+    doc = {
+        "id": video_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "variant": variant,
+        "storage_path": result.get("path", storage_path),
+        "content_type": content_type,
+        "size": result.get("size", len(data)),
+        "is_deleted": False,
+        "created_at": now_iso(),
+    }
+    await db.session_videos.insert_one(doc)
+    return _video_public(doc)
+
+
+@api.get("/sessions/{session_id}/videos")
+async def list_session_videos(
+    session_id: str, user_id: str = Depends(get_current_user_id)
+):
+    session = await db.sessions.find_one(
+        {"id": session_id, "user_id": user_id}, {"_id": 0, "id": 1}
+    )
+    if not session:
+        raise HTTPException(404, "Session not found")
+    cursor = db.session_videos.find(
+        {"session_id": session_id, "user_id": user_id, "is_deleted": False},
+        {"_id": 0},
+    ).sort("created_at", -1)
+    items = await cursor.to_list(10)
+    return {"videos": [_video_public(v) for v in items]}
+
+
+@api.get("/sessions/{session_id}/video/{variant}")
+async def stream_session_video(
+    session_id: str,
+    variant: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Stream the latest stored video for a session+variant.
+
+    Auth resolves from `Authorization` header OR `?auth=<jwt>` query param
+    (see auth.get_current_user_id) so <video src> tags work.
+    """
+    if variant not in (VARIANT_RAW, VARIANT_OVERLAY):
+        raise HTTPException(400, "Invalid variant")
+    doc = await db.session_videos.find_one(
+        {
+            "session_id": session_id,
+            "user_id": user_id,
+            "variant": variant,
+            "is_deleted": False,
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if not doc:
+        raise HTTPException(404, "Video not found")
+    try:
+        data, content_type = get_object(doc["storage_path"])
+    except requests.HTTPError as e:  # noqa: F821
+        logger.error("Storage fetch failed: %s", e)
+        raise HTTPException(502, "Storage fetch failed") from e
+    return Response(
+        content=data,
+        media_type=doc.get("content_type") or content_type,
+        headers={"Cache-Control": "private, max-age=300"},
+    )
+
+
+@api.delete("/sessions/{session_id}/video/{variant}")
+async def delete_session_video(
+    session_id: str,
+    variant: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    if variant not in (VARIANT_RAW, VARIANT_OVERLAY):
+        raise HTTPException(400, "Invalid variant")
+    res = await db.session_videos.update_many(
+        {
+            "session_id": session_id,
+            "user_id": user_id,
+            "variant": variant,
+            "is_deleted": False,
+        },
+        {"$set": {"is_deleted": True}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(404, "Video not found")
+    return {"deleted": True, "variant": variant}
 
 
 @api.post("/sessions/{session_id}/training-plan")
@@ -685,6 +874,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+async def _startup_init_storage():
+    try:
+        init_storage()
+    except Exception as e:
+        logger.error("Storage init failed (will retry on first upload): %s", e)
 
 
 @app.on_event("shutdown")

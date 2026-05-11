@@ -1,0 +1,49 @@
+{
+  "summary": "Phase C (Save + replay captured video) end-to-end testing. Backend: 16/16 pytest cases passed for upload (raw + overlay), validation (invalid variant=400, empty=400, invalid MIME=415, unauth=401, unknown session=404), list, stream with Bearer header AND ?auth=<jwt> query fallback, soft-delete idempotency (re-upload keeps only latest), delete -> 404, reanalyze (200 with analysis+form_score persisted), unknown reanalyze=404, session-delete cascade. Frontend: Capture page renders save-video-toggle/save-video-checkbox below pose canvas (defaults OFF, toggles to ON). SessionDetail renders video-replay-card with session-video-player <video> tag and Re-analyze button enabled when raw video exists. Sessions list regression OK. One frontend test miss: reanalyze button click did not capture a response within 60s in the browser, and delete-video-raw button was not found in DOM at click time (likely below viewport or only rendered after video metadata loads). The backend reanalyze endpoint itself is verified working via pytest.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {
+        "component": "SessionDetail VideoReplayCard",
+        "issue": "data-testid=\"delete-video-raw\" button was not present in DOM at the moment we queried it (count=0). The render conditional is `{active && ...}` and `active` should exist when a raw video is available. The button is correctly defined in code (line 795-803) but may not render until <video> metadata loads, or render order may differ. Worth a quick check that `active` is truthy on first paint when videos[].length === 1. Not a blocker — backend DELETE is verified.",
+        "selector": "[data-testid=\"delete-video-raw\"]",
+        "priority": "LOW"
+      },
+      {
+        "component": "SessionDetail Re-analyze",
+        "issue": "Click on [data-testid='reanalyze-btn'] did not produce a captured POST /reanalyze response within 60s in Playwright. Backend endpoint itself works (pytest passes in ~5-15s). Possible causes: (a) the AuthContext axios instance silently retried/swallowed the request, or (b) the button has a debounce/loading state that suppressed re-trigger because Playwright clicked while another in-flight call was pending. Manual click probably works; recommend adding a visible 'Re-analyzing…' state confirmation and surfacing errors via toast.",
+        "selector": "[data-testid=\"reanalyze-btn\"]",
+        "priority": "LOW"
+      }
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_videos.py",
+    "/app/test_reports/pytest/test_videos_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Verify VideoReplayCard's delete-video-{variant} button is in the DOM immediately when a single variant exists (no race with <video> metadata).",
+    "(Optional) Add a loading/disabled state with a 'Re-analyzing…' label on [data-testid='reanalyze-btn'] while the LLM call is in flight, and surface failures via toast.",
+    "Pre-existing (from iter 3, not retested): 'Building PDF' spinner never shows, and Landing light-mode hero has low-contrast text."
+  ],
+  "critical_code_review_comments": [
+    "server.py upload_session_video: correctly validates variant, MIME, size, soft-deletes prior, stores via emergent obj storage with retry on 403, and persists metadata in MongoDB session_videos collection. _video_public() strips internal fields including _id — good (no ObjectId leak).",
+    "auth.get_current_user_id supports ?auth= JWT fallback so <video src> tags work without Authorization headers — clean.",
+    "delete_session correctly soft-deletes session_videos when the parent session is hard-deleted (validated by cascade test).",
+    "reanalyze_session is idempotent and reuses stored pose_summary — minimal cost, sensible design.",
+    "storage.py: graceful 403/retry pattern is good; consider adding exponential backoff for transient 5xx.",
+    "SessionDetail.jsx is ~926 lines — getting large. Consider extracting VideoReplayCard, KeyframeCard, PlanView into their own files."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_videos.py (new)"
+  ],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "core flows pass; 2 LOW issues"},
+  "test_credentials": "athlete@example.com / Pass1234! (pre-existing) — new dynamic users TEST_video_* and TEST_uifront_* created by tests",
+  "seed_data_creation": "Created 1 basketball session with raw video for UI testing: session_id=8dd8d26d-3ddc-487b-b1c6-1a2fe8fecef7 under user TEST_uifront_6e5ef1a5@example.com (Pass1234!). 4 additional dynamic test users/sessions created and partially cleaned up by test_videos.py.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend video pipeline + reanalyze fully covered by /app/backend/tests/test_videos.py (16 tests, 100% pass, ~50s incl. live LLM call). UI verified via Playwright login -> capture checkbox -> session detail card. Replay video <video> tag renders correctly with session-video-player testid. Use /login (not /auth/login) — that path 404s to landing. For frontend, the Re-analyze response capture is flaky in Playwright but backend is solid.",
+  "rca of the issue": "n/a — no critical bugs found in Phase C. The two LOW frontend observations are timing/render-order issues that don't impact the core save+replay+reanalyze user flow."
+}

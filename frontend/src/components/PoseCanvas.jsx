@@ -103,6 +103,7 @@ export default function PoseCanvas({
   onReady,
   trimStart = 0,
   trimEnd = null,
+  saveVideo = false,
 }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -110,6 +111,14 @@ export default function PoseCanvas({
   const landmarkerRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
+
+  // Video recording (Phase C) — only used when saveVideo === true
+  const compositeCanvasRef = useRef(null);
+  const overlayRecorderRef = useRef(null);
+  const overlayChunksRef = useRef([]);
+  const rawRecorderRef = useRef(null);
+  const rawChunksRef = useRef([]);
+  const recordedBlobsRef = useRef({ raw: null, overlay: null });
 
   // Per-frame landmark buffer (only filled while running, only the locked target)
   const framesRef = useRef([]);
@@ -833,6 +842,20 @@ export default function PoseCanvas({
               }
               drawResults(result);
 
+              // Phase C: composite (video + skeleton) onto a hidden canvas
+              // so MediaRecorder can stream an "overlay-burned" video.
+              if (saveVideo && runningRef.current && compositeCanvasRef.current) {
+                const cc = compositeCanvasRef.current;
+                const vw = v.videoWidth || cc.width;
+                const vh = v.videoHeight || cc.height;
+                if (cc.width !== vw) cc.width = vw;
+                if (cc.height !== vh) cc.height = vh;
+                const cctx = cc.getContext("2d");
+                cctx.drawImage(v, 0, 0, vw, vh);
+                if (canvasRef.current)
+                  cctx.drawImage(canvasRef.current, 0, 0, vw, vh);
+              }
+
               // Basketball: run object detection every frame for responsive
               // ball tracking (shots happen fast — every-other-frame missed
               // mid-flight balls). EfficientDet-Lite0 on GPU is ~5ms.
@@ -1233,6 +1256,106 @@ export default function PoseCanvas({
   };
 
   /* ---------------- Capture controls ---------------- */
+  function pickRecorderMime() {
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+      "video/mp4", // iOS Safari
+    ];
+    for (const m of candidates) {
+      if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported?.(m)) {
+        return m;
+      }
+    }
+    return "";
+  }
+
+  function startRecorders() {
+    if (typeof MediaRecorder === "undefined") return;
+    recordedBlobsRef.current = { raw: null, overlay: null };
+    const mimeType = pickRecorderMime();
+
+    // Overlay recorder — captures the composite canvas (video + skeleton).
+    try {
+      if (!compositeCanvasRef.current) {
+        compositeCanvasRef.current = document.createElement("canvas");
+      }
+      const c = compositeCanvasRef.current;
+      // Seed with current frame size so captureStream produces a non-empty track
+      const v = videoRef.current;
+      const w = (v && v.videoWidth) || 640;
+      const h = (v && v.videoHeight) || 360;
+      if (c.width !== w) c.width = w;
+      if (c.height !== h) c.height = h;
+      const cctx = c.getContext("2d");
+      cctx.fillStyle = "#000";
+      cctx.fillRect(0, 0, w, h);
+      const overlayStream = c.captureStream(30);
+      overlayChunksRef.current = [];
+      const opts = mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : { videoBitsPerSecond: 2_500_000 };
+      const rec = new MediaRecorder(overlayStream, opts);
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) overlayChunksRef.current.push(e.data);
+      };
+      rec.start(1000); // gather 1s chunks
+      overlayRecorderRef.current = rec;
+    } catch (e) {
+      console.warn("[PoseCanvas] overlay recorder start failed", e);
+      overlayRecorderRef.current = null;
+    }
+
+    // Raw recorder — webcam MediaStream (live mode only).
+    if (mode === "live" && streamRef.current) {
+      try {
+        rawChunksRef.current = [];
+        const opts = mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : { videoBitsPerSecond: 2_500_000 };
+        const rec = new MediaRecorder(streamRef.current, opts);
+        rec.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) rawChunksRef.current.push(e.data);
+        };
+        rec.start(1000);
+        rawRecorderRef.current = rec;
+      } catch (e) {
+        console.warn("[PoseCanvas] raw recorder start failed", e);
+        rawRecorderRef.current = null;
+      }
+    }
+  }
+
+  function stopRecorders() {
+    return new Promise((resolve) => {
+      const tasks = [];
+      const finalize = (rec, chunksRef, key, type) => {
+        if (!rec) return;
+        tasks.push(
+          new Promise((r) => {
+            rec.onstop = () => {
+              const blob = new Blob(chunksRef.current, { type });
+              recordedBlobsRef.current[key] = blob.size > 0 ? blob : null;
+              r();
+            };
+            try {
+              if (rec.state !== "inactive") rec.stop();
+              else r();
+            } catch {
+              r();
+            }
+          }),
+        );
+      };
+      const overlayMime = overlayRecorderRef.current?.mimeType || "video/webm";
+      const rawMime = rawRecorderRef.current?.mimeType || "video/webm";
+      finalize(overlayRecorderRef.current, overlayChunksRef, "overlay", overlayMime);
+      finalize(rawRecorderRef.current, rawChunksRef, "raw", rawMime);
+      overlayRecorderRef.current = null;
+      rawRecorderRef.current = null;
+      Promise.all(tasks).then(() => resolve());
+    });
+  }
+
   function start() {
     if (!hasTarget) {
       setError("Tap the athlete you want to track first.");
@@ -1257,6 +1380,15 @@ export default function PoseCanvas({
     runningRef.current = true;
     setRunning(true);
     setStatus("running");
+
+    // Phase C: kick off MediaRecorders if user opted in to save the video.
+    if (saveVideo) {
+      try {
+        startRecorders();
+      } catch (e) {
+        console.warn("[PoseCanvas] failed to start MediaRecorders", e);
+      }
+    }
     const v = videoRef.current;
     if (v && mode === "upload") {
       // Only seek backward if user is BEFORE the trim window. If they scrubbed
@@ -1410,7 +1542,18 @@ export default function PoseCanvas({
       duration_seconds: +duration_s.toFixed(2),
       keyframes,
     };
-    onStop?.(summary);
+
+    // Phase C: drain MediaRecorders (if any) and pass blobs to the caller.
+    let videoBlobs = null;
+    if (saveVideo) {
+      try {
+        await stopRecorders();
+        videoBlobs = recordedBlobsRef.current;
+      } catch (e) {
+        console.warn("[PoseCanvas] stopRecorders failed", e);
+      }
+    }
+    onStop?.(summary, { videoBlobs });
   }
 
   /* ---------------- Render ---------------- */

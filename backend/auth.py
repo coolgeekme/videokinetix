@@ -5,7 +5,7 @@ from typing import Optional
 
 import bcrypt
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 JWT_SECRET = os.environ["JWT_SECRET"]
@@ -43,13 +43,20 @@ def decode_token(token: str) -> dict:
 
 async def get_current_user_id(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    auth: Optional[str] = Query(default=None),
 ) -> str:
-    if credentials is None:
+    """Resolve current user from Authorization header OR ?auth=<jwt> query param.
+
+    Query-param fallback exists so <video src="..."> / <img src="...">
+    tags (which cannot send headers) can still authenticate.
+    """
+    token = credentials.credentials if credentials else auth
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
         )
-    payload = decode_token(credentials.credentials)
+    payload = decode_token(token)
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token payload")

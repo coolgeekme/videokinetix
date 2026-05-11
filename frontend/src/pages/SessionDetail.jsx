@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "@/lib/api";
+import { api, API } from "@/lib/api";
 import { errMsg } from "@/lib/api";
-import { ChevronLeft, Sparkles, Loader2, Trash2, FileDown } from "lucide-react";
+import { ChevronLeft, Sparkles, Loader2, Trash2, FileDown, Video, RotateCw } from "lucide-react";
 import { toast } from "sonner";
 import { exportNodeToPdf, pdfFilename } from "@/lib/pdfExport";
 
@@ -23,7 +23,19 @@ export default function SessionDetail() {
   const [deleting, setDeleting] = useState(false);
   const [deletingPlan, setDeletingPlan] = useState(false);
   const [exportingPdf, setExportingPdf] = useState(false);
+  const [videos, setVideos] = useState([]); // {variant, url, size, ...}
+  const [videoVariant, setVideoVariant] = useState("overlay");
+  const [reanalyzing, setReanalyzing] = useState(false);
   const reportRef = useRef(null);
+
+  const reloadVideos = async () => {
+    try {
+      const { data } = await api.get(`/sessions/${id}/videos`);
+      setVideos(data.videos || []);
+    } catch {
+      setVideos([]);
+    }
+  };
 
   const downloadPdf = async () => {
     if (!reportRef.current) return;
@@ -65,12 +77,45 @@ export default function SessionDetail() {
             /* athlete may have been deleted */
           }
         }
+        reloadVideos();
       })
       .catch((err) => {
         setLoadError(errMsg(err, "Failed to load session"));
       })
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
+
+  const reanalyze = async () => {
+    if (!session) return;
+    if (
+      !window.confirm(
+        "Re-run AI analysis on this session? This will replace the current biomechanics report and training plan suggestions.",
+      )
+    )
+      return;
+    setReanalyzing(true);
+    try {
+      const { data } = await api.post(`/sessions/${id}/reanalyze`);
+      setSession((s) => ({ ...s, ...data }));
+      toast.success("Re-analyzed");
+    } catch (err) {
+      toast.error(errMsg(err, "Re-analyze failed"));
+    } finally {
+      setReanalyzing(false);
+    }
+  };
+
+  const deleteVideo = async (variant) => {
+    if (!window.confirm(`Delete the ${variant} video for this session?`)) return;
+    try {
+      await api.delete(`/sessions/${id}/video/${variant}`);
+      await reloadVideos();
+      toast.success("Video deleted");
+    } catch (err) {
+      toast.error(errMsg(err, "Delete failed"));
+    }
+  };
 
   const generatePlan = async () => {
     setGenerating(true);
@@ -433,6 +478,19 @@ export default function SessionDetail() {
         </div>
 
         <div className="lg:col-span-2 space-y-6">
+          {/* Phase C: Saved video replay */}
+          {videos.length > 0 && (
+            <VideoReplayCard
+              sessionId={id}
+              videos={videos}
+              variant={videoVariant}
+              onVariantChange={setVideoVariant}
+              onDelete={deleteVideo}
+              onReanalyze={reanalyze}
+              reanalyzing={reanalyzing}
+            />
+          )}
+
           <div className="bg-[#121212] border border-white/10 p-6">
             <div className="text-[11px] uppercase tracking-widest text-[#00ff88] font-display font-bold">
               AI Analysis
@@ -620,6 +678,130 @@ export default function SessionDetail() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function VideoReplayCard({
+  sessionId,
+  videos,
+  variant,
+  onVariantChange,
+  onDelete,
+  onReanalyze,
+  reanalyzing,
+}) {
+  const hasRaw = videos.some((v) => v.variant === "raw");
+  const hasOverlay = videos.some((v) => v.variant === "overlay");
+  const active = videos.find((v) => v.variant === variant);
+  // If user picked a variant that doesn't exist, fall back to whichever is available.
+  const effectiveVariant = active
+    ? variant
+    : hasOverlay
+      ? "overlay"
+      : hasRaw
+        ? "raw"
+        : null;
+  const token =
+    typeof window !== "undefined" ? localStorage.getItem("kinetic_token") : null;
+  const src = effectiveVariant
+    ? `${API}/sessions/${sessionId}/video/${effectiveVariant}${token ? `?auth=${token}` : ""}`
+    : null;
+
+  return (
+    <div
+      className="bg-[#121212] border border-white/10 p-6"
+      data-testid="video-replay-card"
+    >
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div className="flex items-center gap-2">
+          <Video className="w-5 h-5 text-[#00e5ff]" strokeWidth={1.5} />
+          <h3 className="font-display font-bold uppercase tracking-tight text-lg">
+            Replay
+          </h3>
+        </div>
+        <button
+          data-testid="reanalyze-btn"
+          onClick={onReanalyze}
+          disabled={reanalyzing || !hasRaw}
+          title={
+            !hasRaw ? "Re-analyze needs a saved raw video for this session." : ""
+          }
+          className="inline-flex items-center gap-2 text-xs uppercase tracking-widest font-display font-bold text-zinc-200 hover:text-white border border-white/10 hover:border-white/30 px-3 py-1.5 transition-colors disabled:opacity-40"
+        >
+          {reanalyzing ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" /> Re-analyzing
+            </>
+          ) : (
+            <>
+              <RotateCw className="w-4 h-4" /> Re-analyze
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Variant selector */}
+      {(hasRaw && hasOverlay) && (
+        <div
+          className="mt-4 inline-flex border border-white/10 overflow-hidden"
+          data-testid="video-variant-tabs"
+        >
+          {[
+            { id: "overlay", label: "Skeleton overlay" },
+            { id: "raw", label: "Raw" },
+          ].map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => onVariantChange(t.id)}
+              data-testid={`video-variant-${t.id}`}
+              className={`px-3 py-1.5 text-[10px] uppercase tracking-widest font-display font-bold transition-colors ${
+                effectiveVariant === t.id
+                  ? "bg-[#ff3b30] text-white"
+                  : "bg-transparent text-zinc-300 hover:bg-white/5"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {src ? (
+        <video
+          key={src}
+          src={src}
+          controls
+          playsInline
+          preload="metadata"
+          data-testid="session-video-player"
+          className="mt-4 w-full aspect-video bg-black border border-white/10"
+        />
+      ) : (
+        <p className="mt-4 text-sm text-zinc-500">
+          No video saved for this session.
+        </p>
+      )}
+
+      {active && (
+        <div className="mt-3 flex items-center justify-between text-[10px] uppercase tracking-widest font-display font-bold text-zinc-500">
+          <span>
+            {active.variant} ·{" "}
+            {active.size > 1024 * 1024
+              ? `${(active.size / (1024 * 1024)).toFixed(1)} MB`
+              : `${Math.round(active.size / 1024)} KB`}
+          </span>
+          <button
+            type="button"
+            onClick={() => onDelete(active.variant)}
+            data-testid={`delete-video-${active.variant}`}
+            className="hover:text-[#ff3b30] transition-colors"
+          >
+            Delete this variant
+          </button>
+        </div>
+      )}
     </div>
   );
 }
