@@ -44,6 +44,7 @@ export default function MultiPlayerPoseCanvas({
   const animationRef = useRef(null);
   const landmarkerRef = useRef(null);
   const lastDetectVideoTimeRef = useRef(-1);
+  const lastDetectAtRef = useRef(0);
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
   const lastPosesRef = useRef([]);
@@ -147,12 +148,17 @@ export default function MultiPlayerPoseCanvas({
       animationRef.current = requestAnimationFrame(tick);
       return;
     }
-    // Throttle detection to actual video frame changes — rAF fires at 60Hz
-    // but videos play at 30fps, so detecting on every tick wastes CPU and
-    // makes <video> playback choppy. Skip when currentTime hasn't advanced.
-    const lastT = lastDetectVideoTimeRef.current;
-    const advanced = v.currentTime !== lastT;
-    if (v.readyState >= 2 && v.videoWidth > 0 && advanced && !v.ended) {
+    // Throttle detection so the <video> element gets enough main-thread budget
+    // to render smoothly. Wall-clock 30Hz cap, plus a frame-advance check for
+    // UPLOAD mode (skip when paused on the same frame). Live MediaStream
+    // intentionally doesn't use the frame-advance check.
+    const now = performance.now();
+    const timeGate = now - lastDetectAtRef.current >= 30;
+    const liveOk = mode === "live" ? !v.paused && !v.ended : true;
+    const uploadAdvanced =
+      mode === "upload" ? v.currentTime !== lastDetectVideoTimeRef.current : true;
+    if (v.readyState >= 2 && v.videoWidth > 0 && timeGate && liveOk && uploadAdvanced) {
+      lastDetectAtRef.current = now;
       lastDetectVideoTimeRef.current = v.currentTime;
       try {
         c.width = v.videoWidth;

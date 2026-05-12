@@ -114,8 +114,9 @@ export default function PoseCanvas({
   // Frame-throttle: video plays at ~30fps native but rAF fires at 60fps. Running
   // pose + ball detection on every rAF tick (a) wastes CPU on duplicate frames
   // and (b) starves the main thread, causing the <video> element to drop
-  // playback frames (choppy preview). We track the last-detected video time
-  // and skip detection if currentTime hasn't advanced.
+  // playback frames (choppy preview). We cap detection at ~30Hz via wall-clock
+  // time AND skip duplicate frames in upload mode via currentTime delta.
+  const lastDetectAtRef = useRef(0);
   const lastDetectVideoTimeRef = useRef(-1);
 
   // Video recording (Phase C) — only used when saveVideo === true
@@ -802,18 +803,25 @@ export default function PoseCanvas({
           const lm = landmarkerRef.current;
           const ready =
             v && lm && v.readyState >= 2 && v.videoWidth > 0;
-          // Run detection ONLY when the video has a new frame to process.
-          // rAF fires at ~60Hz but videos play at 30fps (or are paused on a
-          // single frame). Running detection on every tick wastes CPU and
-          // starves the main thread → <video> drops playback frames → choppy
-          // preview. We compare currentTime to the last-detected time so:
-          // - Playing video: detect on each new frame (~30/sec).
-          // - Paused: detect once after a seek/scrub, then idle.
-          // - Live webcam: currentTime advances continuously while playing.
-          const lastT = lastDetectVideoTimeRef.current;
-          const advanced = !!v && v.currentTime !== lastT;
-          const shouldDetect = ready && !v.ended && advanced;
+          // Throttle detection so the <video> element gets enough main-thread
+          // budget to render smoothly. Two complementary gates:
+          //   1. Wall-clock cap: never run faster than ~30Hz (33ms apart).
+          //      Uploaded video is 30fps and live webcam is 30fps too; running
+          //      at rAF's 60Hz just duplicates work.
+          //   2. Frame-advance check (UPLOAD only): if currentTime hasn't moved
+          //      since the last detection, the user is paused on the same
+          //      frame — no point re-detecting until they scrub.
+          //   Live (MediaStream) intentionally does NOT use the frame-advance
+          //   check, because `currentTime` for live streams can stall in
+          //   Chromium and would silently freeze the skeleton.
+          const now = performance.now();
+          const timeGate = now - lastDetectAtRef.current >= 30;
+          const liveOk = mode === "live" ? !v?.paused && !v?.ended : true;
+          const uploadAdvanced =
+            mode === "upload" ? v?.currentTime !== lastDetectVideoTimeRef.current : true;
+          const shouldDetect = ready && timeGate && liveOk && uploadAdvanced;
           if (shouldDetect) {
+            lastDetectAtRef.current = now;
             lastDetectVideoTimeRef.current = v.currentTime;
             try {
               let result;
