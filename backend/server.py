@@ -504,7 +504,11 @@ async def reanalyze_session(
 
 
 # ---------- Session videos (Phase C) ----------
-MAX_VIDEO_BYTES = 80 * 1024 * 1024  # 80MB hard cap per file
+# Hard cap is intentionally very generous — we expect long-form practice
+# uploads (e.g., a 1-hour pickup game). The frontend records only the
+# trimmed analysis window via MediaRecorder, so even huge source files
+# end up sending only the relevant clip to storage.
+MAX_VIDEO_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB
 ALLOWED_VIDEO_MIMES = {
     "video/mp4", "video/webm", "video/quicktime", "video/x-matroska",
     "video/ogg", "application/octet-stream",

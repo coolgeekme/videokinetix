@@ -1407,12 +1407,26 @@ export default function PoseCanvas({
       overlayRecorderRef.current = null;
     }
 
-    // Raw recorder — webcam MediaStream (live mode only).
+    // Raw recorder — webcam stream (live) or the <video> element itself (upload).
+    // For uploaded videos this captures only the trimmed analysis window
+    // because MediaRecorder runs from start() to stop(). This is what makes
+    // arbitrarily long uploads work: we never re-upload the source file,
+    // only the clip the user actually analyzed.
+    let rawStream = null;
     if (mode === "live" && streamRef.current) {
+      rawStream = streamRef.current;
+    } else if (mode === "upload" && videoRef.current?.captureStream) {
+      try {
+        rawStream = videoRef.current.captureStream();
+      } catch (e) {
+        console.warn("[PoseCanvas] video.captureStream() failed", e);
+      }
+    }
+    if (rawStream) {
       try {
         rawChunksRef.current = [];
         const opts = mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : { videoBitsPerSecond: 2_500_000 };
-        const rec = new MediaRecorder(streamRef.current, opts);
+        const rec = new MediaRecorder(rawStream, opts);
         rec.ondataavailable = (e) => {
           if (e.data && e.data.size > 0) rawChunksRef.current.push(e.data);
         };

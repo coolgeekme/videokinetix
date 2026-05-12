@@ -49,7 +49,6 @@ export default function Capture() {
   const [mode, setMode] = useState("live");
   const [matchMode, setMatchMode] = useState(false); // pickleball doubles only
   const [videoSrc, setVideoSrc] = useState(null);
-  const [videoFile, setVideoFile] = useState(null); // Phase C: keep ref for re-upload
   const [notes, setNotes] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
@@ -83,7 +82,6 @@ export default function Capture() {
     }
     const url = URL.createObjectURL(file);
     setVideoSrc(url);
-    setVideoFile(file);
     setMode("upload");
     setVideoDuration(0);
     setTrim([0, 0]);
@@ -132,13 +130,11 @@ export default function Capture() {
         }),
       );
     }
-    // Raw variant: live → MediaRecorder blob, upload → original File
-    let rawBlob = blobs?.videoBlobs?.raw;
-    let rawType = rawBlob?.type;
-    if (!rawBlob && mode === "upload" && videoFile) {
-      rawBlob = videoFile;
-      rawType = videoFile.type;
-    }
+    // Raw variant: live → MediaRecorder blob (webcam), upload → MediaRecorder
+    // blob captured from the <video> element's captureStream (so only the
+    // trimmed analysis window is saved, not the whole source file).
+    const rawBlob = blobs?.videoBlobs?.raw;
+    const rawType = rawBlob?.type;
     if (rawBlob) {
       const fd = new FormData();
       const ext = (rawType || "").includes("mp4") ? "mp4" : "webm";
@@ -395,7 +391,7 @@ export default function Capture() {
                 Upload video
               </h3>
               <p className="text-sm text-zinc-400 mt-1">
-                Analyze pre-recorded performances frame by frame.
+                Any length, any size — trim to the moment you want analyzed.
               </p>
             </button>
           </div>

@@ -16,6 +16,13 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Feature (Feb 2026 – v1.5 Unlimited video uploads)
+- **Removed effective upload size/length limits**. Three changes work together:
+  1. `backend/server.py`: `MAX_VIDEO_BYTES` bumped from 80 MB → **2 GB**.
+  2. `PoseCanvas.jsx` (`startRecorders`): in upload mode, the **raw** variant is now recorded from `videoElement.captureStream()` instead of re-uploading the original `File`. Because MediaRecorder runs only from Start → Stop, even a 1-hour source video produces just a clip of the trimmed analysis window in storage.
+  3. `Capture.jsx`: removed the unused `videoFile` state + fallback re-upload path; updated the Upload card copy to "Any length, any size — trim to the moment you want analyzed."
+- Result: users can drag in arbitrarily large/long videos, scrub to the moment, set the trim window, and only the relevant clip is analyzed and (optionally) saved.
+
 ## Bug fixes (Feb 2026 – v1.4.3 video-pause regression)
 - **Uploaded video kept pausing itself mid-playback (basketball)** (`PoseCanvas.jsx`): on Brave/Windows, running pose + object detection at the full rAF rate (each ~20-30ms) saturated the main thread and starved the `<video>` decoder, causing the browser to auto-pause the video due to buffer underrun. Two fixes: (1) halve the basketball object-detection rate by skipping every other detect tick (`ballDetectFrameSkipRef`) — pose stays at 30Hz, ball runs at ~15Hz which is plenty for shot tracking; (2) listen for `canplay`/`canplaythrough` events while recording and automatically `play()` again if the video is paused due to a buffer event (skips natural trim-end stops).
 
