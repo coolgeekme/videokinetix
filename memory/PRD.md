@@ -16,6 +16,13 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Bug fixes (Feb 2026 – v1.5.1 basketball rep over-counting)
+- **8 reps reported for 4 actual shots** (`repDetection.js`): the basketball pose-peak detector was counting every wrist-rise as a rep, including the *catch-the-ball-to-chest* motion that happens ~1s before each shot release. Two fixes:
+  1. **`validatePeak` gate**: a peak only counts as a release if the shooting wrist crosses **above the shoulder line** (5% margin). A catch/load motion peaks at chest/chin level (below shoulders) and is now correctly dropped.
+  2. **Tighter thresholds**: `minRepIntervalSec` 1.2s → 1.8s; `minProminence` 0.08 → 0.15.
+  3. **Ball-trajectory cross-validation**: when ball-tracked shots exist (basketball + locked ball + hoop ROI), reps are filtered to only those within ±1.5s of a real ball-tracked shot — ground-truth filter for cases where pose still trips.
+- Verified with synthetic test (simulated 4 shots with catch/load/release/follow-through motions): **OLD = 8 reps, NEW = 4 reps**.
+
 ## Feature (Feb 2026 – v1.5 Unlimited video uploads)
 - **Removed effective upload size/length limits**. Three changes work together:
   1. `backend/server.py`: `MAX_VIDEO_BYTES` bumped from 80 MB → **2 GB**.

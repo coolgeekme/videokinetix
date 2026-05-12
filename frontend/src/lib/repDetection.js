@@ -90,8 +90,29 @@ const SPORTS = {
       const minY = Math.min(lw?.y ?? 1, rw?.y ?? 1); // smaller y = higher
       return 1 - minY; // larger value = wrist higher = closer to release
     },
-    minRepIntervalSec: 1.2,
-    minProminence: 0.08,
+    // Shots take ~2.5-3s end-to-end; raised from 1.2s to filter post-release
+    // bumps (the wrist often dips and comes back up during follow-through).
+    minRepIntervalSec: 1.8,
+    // Raised from 0.08 to 0.15 — a real shot release moves the wrist by a
+    // much larger margin than a setup/load motion.
+    minProminence: 0.15,
+    // Per-peak validator. Only counts a peak as a release if BOTH wrists
+    // are above the shoulders at apex. A "setup/load" peak has the shooting
+    // wrist at chest/chin level (below shoulders) — that should NOT count
+    // as a separate rep. Returns true to keep, false to drop.
+    validatePeak: (lm) => {
+      if (!lm) return true;
+      const lwY = lm[L.LEFT_WRIST]?.y ?? 1;
+      const rwY = lm[L.RIGHT_WRIST]?.y ?? 1;
+      const wristY = Math.min(lwY, rwY); // higher wrist (smaller Y)
+      const lShY = lm[L.LEFT_SHOULDER]?.y ?? 0.5;
+      const rShY = lm[L.RIGHT_SHOULDER]?.y ?? 0.5;
+      const shoulderY = (lShY + rShY) / 2;
+      // Shooting wrist must reach at least 5% above the shoulder line.
+      // At true release the wrist is typically above the head; this is a
+      // conservative gate that catches loads and arm gestures.
+      return wristY < shoulderY - 0.05;
+    },
     apex: (lm) => {
       // Use the higher arm at apex as "shooting" arm
       const lY = lm[L.LEFT_WRIST]?.y ?? 1;
@@ -310,8 +331,18 @@ export function analyzeSession(frames, sport, options = {}) {
     minProminence: cfg.minProminence,
   });
 
+  // Optional per-peak validator (sport-specific). For basketball this drops
+  // setup/load peaks where the wrist hasn't actually crossed the shoulder
+  // line — i.e., it's not a real release.
+  const validatedPeaks = cfg.validatePeak
+    ? peaks.filter((p) => {
+        const f = frames[p.index];
+        return f && cfg.validatePeak(f.lm, f);
+      })
+    : peaks;
+
   // Build per-rep records
-  const reps = peaks.map((p, i) => {
+  const reps = validatedPeaks.map((p, i) => {
     const f = frames[p.index];
     const prevFrame = p.index > 0 ? frames[p.index - 1] : null;
     const apex = cfg.apex(f.lm, f.t, prevFrame?.lm);
@@ -412,7 +443,32 @@ export function analyzeSession(frames, sport, options = {}) {
   let annotatedReps = reps;
   if (sport === "basketball" && ballFrames && hoopRoi) {
     shot_outcomes = detectShots(ballFrames, hoopRoi);
-    annotatedReps = annotateRepsWithOutcomes(reps, shot_outcomes.shots);
+    // CRITICAL FILTER: when we have ball-tracked shots, those are the
+    // ground truth. Drop any pose-peak rep that doesn't have a matching
+    // ball-shot within ±1.5s — those are setup motions, arm gestures, or
+    // pose-detector noise, NOT real shots. This eliminates the over-count.
+    // (If no shots were detected, e.g., hoop ROI never placed or no ball
+    // tracked, we keep the pose-only reps so the user still gets feedback.)
+    if (shot_outcomes.shots.length > 0) {
+      const matchWindow = 1.5;
+      reps.forEach((r) => {
+        let matched = false;
+        for (const s of shot_outcomes.shots) {
+          if (Math.abs(s.t_apex - r.time_s) <= matchWindow) {
+            matched = true;
+            break;
+          }
+        }
+        r._has_matching_shot = matched;
+      });
+      const filtered = reps.filter((r) => r._has_matching_shot);
+      // Re-index reps after filtering so indices stay 1..N contiguous.
+      annotatedReps = filtered.map((r, i) => {
+        const { _has_matching_shot, ...rest } = r;
+        return { ...rest, index: i + 1 };
+      });
+    }
+    annotatedReps = annotateRepsWithOutcomes(annotatedReps, shot_outcomes.shots);
     makes_vs_misses = makesVsMissesStats(annotatedReps);
   }
 
