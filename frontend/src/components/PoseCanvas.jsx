@@ -111,6 +111,12 @@ export default function PoseCanvas({
   const landmarkerRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(null);
+  // Frame-throttle: video plays at ~30fps native but rAF fires at 60fps. Running
+  // pose + ball detection on every rAF tick (a) wastes CPU on duplicate frames
+  // and (b) starves the main thread, causing the <video> element to drop
+  // playback frames (choppy preview). We track the last-detected video time
+  // and skip detection if currentTime hasn't advanced.
+  const lastDetectVideoTimeRef = useRef(-1);
 
   // Video recording (Phase C) — only used when saveVideo === true
   const compositeCanvasRef = useRef(null);
@@ -796,10 +802,19 @@ export default function PoseCanvas({
           const lm = landmarkerRef.current;
           const ready =
             v && lm && v.readyState >= 2 && v.videoWidth > 0;
-          const shouldDetect =
-            ready &&
-            (mode === "live" ? !v.paused && !v.ended : true);
+          // Run detection ONLY when the video has a new frame to process.
+          // rAF fires at ~60Hz but videos play at 30fps (or are paused on a
+          // single frame). Running detection on every tick wastes CPU and
+          // starves the main thread → <video> drops playback frames → choppy
+          // preview. We compare currentTime to the last-detected time so:
+          // - Playing video: detect on each new frame (~30/sec).
+          // - Paused: detect once after a seek/scrub, then idle.
+          // - Live webcam: currentTime advances continuously while playing.
+          const lastT = lastDetectVideoTimeRef.current;
+          const advanced = !!v && v.currentTime !== lastT;
+          const shouldDetect = ready && !v.ended && advanced;
           if (shouldDetect) {
+            lastDetectVideoTimeRef.current = v.currentTime;
             try {
               let result;
               if (zoom > 1.001) {

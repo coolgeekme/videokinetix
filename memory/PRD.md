@@ -16,6 +16,9 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Bug fixes (Feb 2026 – v1.4.2 perf)
+- **Choppy uploaded-video playback** (`PoseCanvas.jsx` + `MultiPlayerPoseCanvas.jsx`): pose + ball detection was running on every `requestAnimationFrame` tick (~60Hz) but uploaded videos play at 30fps and paused videos don't advance at all. Each detection blocks the main thread ~10-30ms — at 60Hz that consumes 60-100% of one core, starving the `<video>` element and causing it to drop playback frames (visibly choppy on Windows Brave with longer/HEVC clips). Fix: throttle detection to actual video frame changes by tracking `lastDetectVideoTimeRef` and only running when `video.currentTime` has advanced. Paused-frame tap-lock still works because a seek/scrub fires one detection. Net effect: ~50% less CPU during playback, smooth `<video>` rendering.
+
 ## Bug fixes (Feb 2026 – v1.4.1)
 - **Basketball ball-tracking identity switch** (`PoseCanvas.jsx`): the locked ball would jump to a stationary "court decoy" basketball at shot release because the moving ball was briefly occluded by the shooter's hand, leaving the decoy as the only candidate inside the 0.45-norm gate from the (low-velocity) anchor. Fix: classify each detected ball as **stationary** if a similarly-positioned detection (within 2.5% of frame) has been present in ≥12 of the last 18 frames, and exclude any stationary candidate from the locked-ball candidate pool unless it sits within 5% of the current anchor (i.e., it IS the locked ball). When the moving ball is briefly undetected, the tracker now falls through to its existing 250ms velocity extrapolation instead of stealing onto the decoy.
 
