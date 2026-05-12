@@ -142,6 +142,11 @@ export default function PoseCanvas({
   const ballFramesRef = useRef([]); // {t, x, y, conf}[] during recording (only when target is locked + running)
   const lastBallRef = useRef(null); // most recent detected target ball {x, y, conf} (live preview)
   const lastBallsRef = useRef([]); // all detected balls in current frame (for multi-ball picker)
+  // Per-frame history of ALL detected balls. Used to classify stationary
+  // "court decoys" (balls sitting on the floor) so they cannot steal the
+  // lock from the in-play shot ball, especially during the release phase
+  // when the moving ball is briefly occluded by hand/body.
+  const ballAllHistoryRef = useRef([]);
   const ballAnchorRef = useRef(null); // {x, y} when user has explicitly locked a specific ball; null = auto-pick highest-conf
   // Velocity-aware prediction state for the locked ball. Critical for keeping
   // tracking glued to a fast-moving basketball during a shot — frame-to-frame
@@ -240,6 +245,7 @@ export default function PoseCanvas({
     ballAnchorRef.current = null;
     ballLockedSizeRef.current = null;
     ballPredictRef.current = null;
+    ballAllHistoryRef.current = [];
     setHasLockedBall(false);
   };
 
@@ -884,6 +890,34 @@ export default function PoseCanvas({
                     }
                     lastBallsRef.current = allBalls;
                     setBallCount(allBalls.length);
+
+                    // Classify each current ball as "stationary" if a similar
+                    // position has been detected in most of the recent frames.
+                    // A stationary detection on the court is a decoy that
+                    // should never be allowed to steal the lock from the
+                    // in-play shot ball.
+                    const HIST_WINDOW = 18; // ~600ms at 30fps
+                    const HIST_THRESHOLD = 12; // present in ≥2/3 of recent frames
+                    const STATIONARY_EPS = 0.025; // 2.5% of normalized space
+                    ballAllHistoryRef.current.push(allBalls);
+                    if (ballAllHistoryRef.current.length > HIST_WINDOW) {
+                      ballAllHistoryRef.current.shift();
+                    }
+                    const history = ballAllHistoryRef.current;
+                    for (const b of allBalls) {
+                      let presentInFrames = 0;
+                      for (const past of history) {
+                        for (const pb of past) {
+                          if (
+                            Math.hypot(pb.x - b.x, pb.y - b.y) < STATIONARY_EPS
+                          ) {
+                            presentInFrames++;
+                            break;
+                          }
+                        }
+                      }
+                      b.stationary = presentInFrames >= HIST_THRESHOLD;
+                    }
                     // Pick the *target* ball using one of three strategies:
                     //   1) User locked → predict next position from velocity,
                     //      score detections by distance + size similarity + conf.
@@ -904,8 +938,24 @@ export default function PoseCanvas({
                           predY = pred.y + pred.vy * dt;
                         }
                         const targetSize = ballLockedSizeRef.current;
+                        // Filter candidate pool: a stationary ball that is
+                        // NOT at the locked anchor is a court decoy. Reject
+                        // it outright so it can never win the lock — this
+                        // is the fix for the "lock jumps to a stationary
+                        // ball at shot release" bug. The locked ball itself
+                        // (if still stationary, e.g., pre-release held ball)
+                        // will be at d≈0 from the anchor and pass.
+                        const anchor = ballAnchorRef.current;
+                        const candidates = allBalls.filter((b) => {
+                          if (!b.stationary) return true;
+                          const dFromAnchor = Math.hypot(
+                            b.x - anchor.x,
+                            b.y - anchor.y,
+                          );
+                          return dFromAnchor < 0.05; // 5% of frame — same ball
+                        });
                         let bestScore = -Infinity;
-                        for (const b of allBalls) {
+                        for (const b of candidates) {
                           const d = Math.hypot(b.x - predX, b.y - predY);
                           // Size similarity (0 = exact match, 1+ = very different)
                           const sizeDelta = targetSize

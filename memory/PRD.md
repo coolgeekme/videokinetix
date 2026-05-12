@@ -16,6 +16,9 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Bug fixes (Feb 2026 – v1.4.1)
+- **Basketball ball-tracking identity switch** (`PoseCanvas.jsx`): the locked ball would jump to a stationary "court decoy" basketball at shot release because the moving ball was briefly occluded by the shooter's hand, leaving the decoy as the only candidate inside the 0.45-norm gate from the (low-velocity) anchor. Fix: classify each detected ball as **stationary** if a similarly-positioned detection (within 2.5% of frame) has been present in ≥12 of the last 18 frames, and exclude any stationary candidate from the locked-ball candidate pool unless it sits within 5% of the current anchor (i.e., it IS the locked ball). When the moving ball is briefly undetected, the tracker now falls through to its existing 250ms velocity extrapolation instead of stealing onto the decoy.
+
 ## Implemented (Feb 2026 – v1.4 Save + Replay Captured Video — Phase C)
 - **Emergent object storage integration**: `backend/storage.py` wraps the Emergent objstore API (init_storage at startup, put_object/get_object with 403→re-init retry). All videos prefixed `visionkinetix/videos/{user_id}/{session_id}/`.
 - **Endpoints**:
