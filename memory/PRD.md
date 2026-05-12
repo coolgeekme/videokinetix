@@ -16,6 +16,9 @@ AI-Assisted Sport-Agnostic Athlete Training Platform leveraging FreeMoCap-style 
   - MediaPipe Pose (CDN) for in-browser motion capture & skeleton overlay
 - **Theme**: Dark, Barlow Condensed + Manrope, Red #FF3B30 / Green #00FF88
 
+## Bug fixes (Feb 2026 – v1.4.3 video-pause regression)
+- **Uploaded video kept pausing itself mid-playback (basketball)** (`PoseCanvas.jsx`): on Brave/Windows, running pose + object detection at the full rAF rate (each ~20-30ms) saturated the main thread and starved the `<video>` decoder, causing the browser to auto-pause the video due to buffer underrun. Two fixes: (1) halve the basketball object-detection rate by skipping every other detect tick (`ballDetectFrameSkipRef`) — pose stays at 30Hz, ball runs at ~15Hz which is plenty for shot tracking; (2) listen for `canplay`/`canplaythrough` events while recording and automatically `play()` again if the video is paused due to a buffer event (skips natural trim-end stops).
+
 ## Bug fixes (Feb 2026 – v1.4.2 perf)
 - **Choppy uploaded-video playback** (`PoseCanvas.jsx` + `MultiPlayerPoseCanvas.jsx`): pose + ball detection was running on every `requestAnimationFrame` tick (~60Hz) but uploaded videos play at 30fps and paused videos don't advance at all. Each detection blocks the main thread ~10-30ms — at 60Hz that consumes 60-100% of one core, starving the `<video>` element and causing it to drop playback frames (visibly choppy on Windows Brave with longer/HEVC clips). Fix: throttle detection to actual video frame changes by tracking `lastDetectVideoTimeRef` and only running when `video.currentTime` has advanced. Paused-frame tap-lock still works because a seek/scrub fires one detection. Net effect: ~50% less CPU during playback, smooth `<video>` rendering.
 

@@ -885,11 +885,17 @@ export default function PoseCanvas({
                   cctx.drawImage(canvasRef.current, 0, 0, vw, vh);
               }
 
-              // Basketball: run object detection every frame for responsive
-              // ball tracking (shots happen fast — every-other-frame missed
-              // mid-flight balls). EfficientDet-Lite0 on GPU is ~5ms.
+              // Basketball: object detection is the second-most expensive
+              // operation per frame (after pose). Running it on EVERY detect
+              // tick saturates the main thread on average laptops/Brave on
+              // Windows and starves the <video> decoder → browser auto-pauses
+              // the upload mid-playback. Skip every other tick so ball runs
+              // at ~half the pose-detection rate.
               const ballDet = ballDetectorRef.current;
-              if (sport === "basketball" && ballDet) {
+              ballDetectFrameSkipRef.current =
+                (ballDetectFrameSkipRef.current + 1) % 2;
+              const runBallThisTick = ballDetectFrameSkipRef.current === 0;
+              if (sport === "basketball" && ballDet && runBallThisTick) {
                 {
                   try {
                     const detRes = ballDet.detectForVideo(v, performance.now());
@@ -1150,14 +1156,35 @@ export default function PoseCanvas({
     if (!v) return;
     const onPlay = () => setVideoPaused(false);
     const onPause = () => setVideoPaused(true);
+    // Browsers fire `waiting` when the decoder is starved (buffer underrun)
+    // and `playing`/`canplay` when it recovers. On Windows Brave with HEVC
+    // .MOV files plus heavy MediaPipe inference, this happens often and
+    // sometimes the browser doesn't auto-resume on its own. We listen and
+    // resume manually while still inside the recording window.
+    const tryResume = () => {
+      if (!runningRef.current) return;
+      const vid = videoRef.current;
+      if (!vid || !vid.paused || vid.ended) return;
+      // Don't resume if we are at/past the trim end (auto-stop handled elsewhere)
+      const end = trimEnd && trimEnd > (trimStart || 0) ? trimEnd : null;
+      if (end != null && vid.currentTime >= end - 0.05) return;
+      if (vid.currentTime >= (vid.duration || Infinity) - 0.05) return;
+      vid.play().catch(() => {
+        /* ignore */
+      });
+    };
     v.addEventListener("play", onPlay);
     v.addEventListener("pause", onPause);
+    v.addEventListener("canplay", tryResume);
+    v.addEventListener("canplaythrough", tryResume);
     setVideoPaused(v.paused);
     return () => {
       v.removeEventListener("play", onPlay);
       v.removeEventListener("pause", onPause);
+      v.removeEventListener("canplay", tryResume);
+      v.removeEventListener("canplaythrough", tryResume);
     };
-  }, [mode, videoSrc]);
+  }, [mode, videoSrc, trimEnd, trimStart]);
 
   const togglePlayPause = async () => {
     const v = videoRef.current;
