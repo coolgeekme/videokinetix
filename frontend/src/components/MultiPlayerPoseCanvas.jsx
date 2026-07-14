@@ -3,6 +3,7 @@ import { Target, AlertTriangle, X, Play, Pause } from "lucide-react";
 import { loadPoseLandmarker } from "../lib/mediapipeLoader";
 import { analyzeSession } from "../lib/repDetection";
 import { assessFrameQuality } from "../lib/frameQuality";
+import { PoseIdentityTracker } from "../lib/poseIdentityTracker";
 
 // Up to 4 players — each gets a distinct color for the skeleton + UI.
 // Matches the colors used in the slot pills.
@@ -48,7 +49,10 @@ export default function MultiPlayerPoseCanvas({
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
   const lastPosesRef = useRef([]);
-  // Per-slot tracking refs. playersRef.current = [{ slot, color, anchor, predict, lastSeenAt, frames }]
+  const poseTrackerRef = useRef(null);
+  if (!poseTrackerRef.current) poseTrackerRef.current = new PoseIdentityTracker();
+  const lastPoseTracksRef = useRef({ byPoseIndex: new Map(), tracks: [] });
+  // Each selected player owns a persistent track ID, independent of pose order.
   const playersRef = useRef([]);
   const [playerCount, setPlayerCount] = useState(0);
   const [running, setRunning] = useState(false);
@@ -56,6 +60,7 @@ export default function MultiPlayerPoseCanvas({
   const [status, setStatus] = useState("idle"); // 'idle' | 'loading' | 'ready' | 'running' | 'analyzing'
   const [error, setError] = useState(null);
   const [personCount, setPersonCount] = useState(0);
+  const [lostPlayerCount, setLostPlayerCount] = useState(0);
   const [videoPaused, setVideoPaused] = useState(true);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
   const lastQualityUpdateRef = useRef(0);
@@ -65,6 +70,11 @@ export default function MultiPlayerPoseCanvas({
     let cancelled = false;
     async function init() {
       try {
+        poseTrackerRef.current.reset();
+        lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
+        playersRef.current = [];
+        setPlayerCount(0);
+        setLostPlayerCount(0);
         setStatus("loading");
         const lm = await loadPoseLandmarker(8); // need higher pose count for 4 players
         if (cancelled) return;
@@ -167,14 +177,16 @@ export default function MultiPlayerPoseCanvas({
         const poses = result?.landmarks || [];
         lastPosesRef.current = poses;
         setPersonCount(poses.length);
+        const poseTracks = poseTrackerRef.current.update(poses, performance.now());
+        lastPoseTracksRef.current = poseTracks;
         // Throttled frame-quality check
         const nowQ = performance.now();
         if (nowQ - lastQualityUpdateRef.current > 500) {
           lastQualityUpdateRef.current = nowQ;
           setFrameQuality(assessFrameQuality(poses, { sport }));
         }
-        // Match each detected pose to nearest player anchor (Hungarian-light)
-        matchPosesToPlayers(poses);
+        // Resolve every selected persistent ID to its current pose.
+        matchTracksToPlayers();
         // If running, record per-player frames
         if (runningRef.current && startedAtRef.current != null) {
           const t = (Date.now() - startedAtRef.current) / 1000;
@@ -190,55 +202,20 @@ export default function MultiPlayerPoseCanvas({
     animationRef.current = requestAnimationFrame(tick);
   }
 
-  function matchPosesToPlayers(poses) {
-    const players = playersRef.current;
-    // Reset assignments
-    for (const p of players) p.matchedPose = null;
-    if (players.length === 0 || poses.length === 0) return;
-    // Greedy nearest-pose matching on hip-center, with velocity-aware prediction
+  function matchTracksToPlayers() {
     const nowS = performance.now() / 1000;
-    const used = new Set();
-    // Sort players by descending lock-time (most-recent first) so the
-    // freshly-locked one gets first pick of the closest pose.
-    const order = [...players].sort((a, b) => b.lastSeenAt - a.lastSeenAt);
-    for (const p of order) {
-      const pred = p.predict;
-      const dt = pred ? Math.min(0.5, nowS - pred.t) : 0;
-      const targetX = pred ? pred.x + (pred.vx || 0) * dt : p.anchor.x;
-      const targetY = pred ? pred.y + (pred.vy || 0) * dt : p.anchor.y;
-      let bestIdx = -1;
-      let bestD = 0.4; // generous gate — players move fast in pickleball
-      for (let i = 0; i < poses.length; i++) {
-        if (used.has(i)) continue;
-        const c = hipCenter(poses[i]);
-        if (!c) continue;
-        const d = dist2D(c, { x: targetX, y: targetY });
-        if (d < bestD) { bestD = d; bestIdx = i; }
-      }
-      if (bestIdx !== -1) {
-        used.add(bestIdx);
-        p.matchedPose = poses[bestIdx];
-        const c = hipCenter(poses[bestIdx]);
-        if (c) {
-          if (pred) {
-            const dtPred = Math.max(0.001, nowS - pred.t);
-            const rawVx = (c.x - pred.x) / dtPred;
-            const rawVy = (c.y - pred.y) / dtPred;
-            const alpha = 0.45;
-            p.predict = {
-              x: c.x, y: c.y,
-              vx: alpha * rawVx + (1 - alpha) * (pred.vx || 0),
-              vy: alpha * rawVy + (1 - alpha) * (pred.vy || 0),
-              t: nowS,
-            };
-          } else {
-            p.predict = { x: c.x, y: c.y, vx: 0, vy: 0, t: nowS };
-          }
-          p.anchor = c;
-          p.lastSeenAt = nowS;
-        }
+    let lost = 0;
+    for (const player of playersRef.current) {
+      const track = poseTrackerRef.current.getTrack(player.trackId);
+      player.matchedPose = track?.landmarks || null;
+      if (track?.landmarks && track.poseIndex >= 0) {
+        player.anchor = track.center;
+        player.lastSeenAt = nowS;
+      } else {
+        lost += 1;
       }
     }
+    setLostPlayerCount(lost);
   }
 
   function drawScene(poses) {
@@ -312,10 +289,11 @@ export default function MultiPlayerPoseCanvas({
     });
     if (bestIdx === -1 || bestDist >= 0.4) return;
     const c2 = hipCenter(poses[bestIdx]);
-    if (!c2) return;
+    const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(bestIdx);
+    if (!c2 || !poseTrack) return;
     // If this pose is already owned by a player, remove that player (toggle off)
     for (const p of playersRef.current) {
-      if (dist2D(p.anchor, c2) < 0.06) {
+      if (p.trackId === poseTrack.id) {
         playersRef.current = playersRef.current.filter((q) => q !== p);
         // Re-slot remaining players
         playersRef.current.forEach((q, idx) => { q.slot = idx; q.color = PLAYER_COLORS[idx]; });
@@ -328,8 +306,8 @@ export default function MultiPlayerPoseCanvas({
     playersRef.current.push({
       slot,
       color: PLAYER_COLORS[slot],
+      trackId: poseTrack.id,
       anchor: c2,
-      predict: { x: c2.x, y: c2.y, vx: 0, vy: 0, t: performance.now() / 1000 },
       lastSeenAt: performance.now() / 1000,
       matchedPose: null,
       frames: [],
@@ -341,6 +319,7 @@ export default function MultiPlayerPoseCanvas({
     if (running) return;
     playersRef.current = [];
     setPlayerCount(0);
+    setLostPlayerCount(0);
   }
 
   /* ---------- play/pause helper ---------- */
@@ -357,7 +336,10 @@ export default function MultiPlayerPoseCanvas({
       return;
     }
     setError(null);
-    for (const p of playersRef.current) p.frames = [];
+    for (const p of playersRef.current) {
+      p.frames = [];
+      poseTrackerRef.current.touchTrack(p.trackId, performance.now());
+    }
     startedAtRef.current = Date.now();
     runningRef.current = true;
     setRunning(true);
@@ -518,6 +500,15 @@ export default function MultiPlayerPoseCanvas({
                 ? "Frame: good"
                 : frameQuality.issues[0] || `Frame: ${frameQuality.level}`}
             </span>
+          </div>
+        )}
+
+        {running && lostPlayerCount > 0 && (
+          <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ffab00]/60 px-4 py-2 text-center pointer-events-none">
+            <AlertTriangle className="w-4 h-4 text-[#ffab00] mx-auto" />
+            <div className="mt-1 text-[10px] uppercase tracking-widest font-display font-bold text-[#ffab00]">
+              {lostPlayerCount} selected player{lostPlayerCount === 1 ? "" : "s"} lost — analysis paused
+            </div>
           </div>
         )}
 

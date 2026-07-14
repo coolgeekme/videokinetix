@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
 import { assessFrameQuality } from "../lib/frameQuality";
+import { PoseIdentityTracker } from "../lib/poseIdentityTracker";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
@@ -16,8 +17,7 @@ const PERSON_COLORS = ["#7dd3fc", "#fbbf24", "#c084fc", "#f472b6", "#94a3b8"];
 const TARGET_COLOR = "#00ff88"; // green = currently tracked
 const JOINT_COLOR_TARGET = "#ff3b30";
 
-// Tracking thresholds (normalized 0-1 coordinates)
-const TRACKING_DISTANCE_THRESHOLD = 0.18;
+// Delay before warning that the selected persistent identity is absent.
 const TRACKING_LOST_GRACE_MS = 1500;
 
 let landmarkerLoaderPromise = null;
@@ -136,6 +136,10 @@ export default function PoseCanvas({
 
   // Latest detected poses + target tracking
   const lastPosesRef = useRef([]); // current frame's poses
+  const poseTrackerRef = useRef(null);
+  if (!poseTrackerRef.current) poseTrackerRef.current = new PoseIdentityTracker();
+  const lastPoseTracksRef = useRef({ byPoseIndex: new Map(), tracks: [] });
+  const targetTrackIdRef = useRef(null); // persistent identity selected by the user
   const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
   const [hasTarget, setHasTarget] = useState(false);
@@ -368,6 +372,8 @@ export default function PoseCanvas({
       const poses = result?.landmarks || [];
       lastPosesRef.current = poses;
       setPersonCount(poses.length);
+      const poseTracks = poseTrackerRef.current.update(poses, performance.now());
+      lastPoseTracksRef.current = poseTracks;
 
       // Frame quality (throttled to 500ms) — gives users live feedback on
       // whether their camera setup is producing analyzable footage.
@@ -377,42 +383,23 @@ export default function PoseCanvas({
         setFrameQuality(assessFrameQuality(poses, { sport }));
       }
 
-      // Identify which detected pose is "the target" via nearest-neighbour tracking
+      // Resolve the selected persistent track ID to this frame's pose.
       let targetIdx = -1;
-      if (poses.length > 0) {
-        if (targetAnchorRef.current) {
-          let bestDist = Infinity;
-          poses.forEach((lm, i) => {
-            const c = hipCenter(lm);
-            const d = dist2D(c, targetAnchorRef.current);
-            if (d < bestDist) {
-              bestDist = d;
-              targetIdx = i;
-            }
-          });
-          // Use a more permissive threshold while recording — fast-moving
-          // athletes can travel a long way between detection ticks. As long as
-          // we have a pose, we update the anchor so it follows the motion.
-          // Single-pose case (poses.length === 1) is the dominant scenario for
-          // most users and we should always adopt it.
-          const adoptThreshold = runningRef.current
-            ? TRACKING_DISTANCE_THRESHOLD * 3 // relaxed during recording
-            : TRACKING_DISTANCE_THRESHOLD;
-          if (bestDist > adoptThreshold && poses.length > 1) {
-            targetIdx = -1;
-          } else {
-            targetAnchorRef.current = hipCenter(poses[targetIdx]);
-            lastSeenAtRef.current = Date.now();
-          }
-        }
+      const targetTrack = targetTrackIdRef.current != null
+        ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
+        : null;
+      if (targetTrack?.poseIndex >= 0 && targetTrack.landmarks) {
+        targetIdx = targetTrack.poseIndex;
+        targetAnchorRef.current = targetTrack.center;
+        lastSeenAtRef.current = Date.now();
       }
-
       // Draw all poses; highlight the target
       poses.forEach((lm, i) => {
         const isTarget = i === targetIdx;
+        const poseTrack = poseTracks.byPoseIndex.get(i);
         const colour = isTarget
           ? TARGET_COLOR
-          : PERSON_COLORS[i % PERSON_COLORS.length];
+          : PERSON_COLORS[((poseTrack?.id || i + 1) - 1) % PERSON_COLORS.length];
         ctx.lineWidth = isTarget ? 5 : 2;
         ctx.strokeStyle = colour;
         ctx.shadowColor = colour;
@@ -450,7 +437,7 @@ export default function PoseCanvas({
           ctx.font = "bold 16px sans-serif";
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
-          ctx.fillText(String(i + 1), px, py);
+          ctx.fillText(String(poseTrack?.id || i + 1), px, py);
         }
         ctx.globalAlpha = 1;
       });
@@ -560,30 +547,12 @@ export default function PoseCanvas({
       }
 
       // Tracking-lost detection
-      if (targetAnchorRef.current && targetIdx === -1) {
+      if (targetTrackIdRef.current != null && targetIdx === -1) {
         if (
           lastSeenAtRef.current &&
           Date.now() - lastSeenAtRef.current > TRACKING_LOST_GRACE_MS
         ) {
           if (!trackingLost) setTrackingLost(true);
-          // try to re-lock onto closest pose to last anchor (relax threshold)
-          if (poses.length > 0) {
-            let bestDist = Infinity;
-            let bestIdx = -1;
-            poses.forEach((lm, i) => {
-              const c = hipCenter(lm);
-              const d = dist2D(c, targetAnchorRef.current);
-              if (d < bestDist) {
-                bestDist = d;
-                bestIdx = i;
-              }
-            });
-            if (bestIdx >= 0) {
-              targetAnchorRef.current = hipCenter(poses[bestIdx]);
-              lastSeenAtRef.current = Date.now();
-              setTrackingLost(false);
-            }
-          }
         }
       } else if (trackingLost && targetIdx !== -1) {
         setTrackingLost(false);
@@ -641,6 +610,9 @@ export default function PoseCanvas({
 
   /* ---------------- Reset target tracking when video source changes ---------------- */
   useEffect(() => {
+    poseTrackerRef.current.reset();
+    lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
+    targetTrackIdRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
@@ -857,8 +829,8 @@ export default function PoseCanvas({
                 // Smart-ROI / tile-detection caused frozen-skeleton bugs because
                 // a stale or off-center ROI would persistently miss the athlete.
                 // Full-frame is reliable and fast enough for single-athlete
-                // tracking during playback; nearest-neighbour pose matching in
-                // drawResults() keeps the locked target identified.
+                // tracking during playback; persistent pose IDs in drawResults()
+                // keep the locked target identified.
                 result = lm.detectForVideo(v, performance.now());
               } else {
                 // Selection (live or upload, no zoom): single full-frame detection.
@@ -1321,7 +1293,9 @@ export default function PoseCanvas({
     // the canvas width, but bestDist comparison still picks the closest pose.
     if (bestIdx >= 0 && bestDist < 0.4 / zoom) {
       const c = hipCenter(poses[bestIdx]);
-      if (c) {
+      const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(bestIdx);
+      if (c && poseTrack) {
+        targetTrackIdRef.current = poseTrack.id;
         targetAnchorRef.current = c;
         lastSeenAtRef.current = Date.now();
         setHasTarget(true);
@@ -1334,6 +1308,7 @@ export default function PoseCanvas({
 
   const clearTarget = () => {
     if (running) return;
+    targetTrackIdRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     setHasTarget(false);
@@ -1492,6 +1467,9 @@ export default function PoseCanvas({
     };
     startedAtRef.current = Date.now();
     runningRef.current = true;
+    if (targetTrackIdRef.current != null) {
+      poseTrackerRef.current.touchTrack(targetTrackIdRef.current, performance.now());
+    }
     setRunning(true);
     setStatus("running");
 
@@ -1945,7 +1923,7 @@ export default function PoseCanvas({
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ffab00]/60 px-5 py-3 text-center pointer-events-none">
             <AlertTriangle className="w-5 h-5 text-[#ffab00] mx-auto" />
             <div className="mt-1 text-[11px] uppercase tracking-widest font-display font-bold text-[#ffab00]">
-              Tracking lost — re-locking…
+              Selected athlete lost — analysis paused
             </div>
           </div>
         )}
