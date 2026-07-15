@@ -18,6 +18,7 @@ import {
   findTrackAtPoint,
   paddedTrackRoi,
   poseIndexInsideTrack,
+  poseMatchesTrack,
 } from "../lib/enhancedTracking";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
@@ -589,7 +590,7 @@ export default function PoseCanvas({
           : 1;
         if (
           appearance &&
-          (!gallery.length || selectedEnhancedTrack || similarity >= 0.56)
+          (!gallery.length || similarity >= (selectedEnhancedTrack ? 0.44 : 0.56))
         ) {
           const blended = gallery.length
             ? blendAppearance(gallery[0], appearance, 0.12)
@@ -1159,21 +1160,46 @@ export default function PoseCanvas({
                     : tracks.find(
                         (track) => track.id === selectedEnhancedTrackIdRef.current
                       );
-                  let identityTrack = selected;
+                  const localTarget = targetTrackIdRef.current != null
+                    ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
+                    : null;
+                  const gallery = targetAppearanceGalleryRef.current;
+                  const scoreIdentityTrack = (track) => {
+                    if (!track) return null;
+                    const descriptor = sampleTrackAppearance(track);
+                    const similarity = gallery.length && descriptor
+                      ? bestAppearanceSimilarity(gallery, descriptor)
+                      : 1;
+                    const roi = paddedTrackRoi(track, 0);
+                    const distance = localTarget?.center && roi?.center
+                      ? dist2D(localTarget.center, roi.center)
+                      : 0;
+                    return { track, similarity, distance, score: similarity * 2.5 - distance * 2 };
+                  };
+                  const selectedIdentity = scoreIdentityTrack(selected);
+                  let identityTrack = selectedIdentity &&
+                    (!gallery.length || selectedIdentity.similarity >= 0.34) &&
+                    (!localTarget?.center || selectedIdentity.distance <= 0.3)
+                    ? selected
+                    : null;
                   if (
                     !identityTrack &&
-                    targetTrackIdRef.current != null
+                    localTarget?.center
                   ) {
-                    const localTarget = poseTrackerRef.current.getTrack(
-                      targetTrackIdRef.current
-                    );
-                    identityTrack = localTarget?.center
-                      ? findTrackAtPoint(tracks, localTarget.center)
-                      : null;
+                    const candidate = tracks
+                      .map(scoreIdentityTrack)
+                      .filter(
+                        (item) =>
+                          item && item.distance <= 0.34 &&
+                          (!gallery.length || item.similarity >= 0.38)
+                      )
+                      .sort((a, b) => b.score - a.score)[0];
+                    identityTrack = candidate?.track || null;
                     if (identityTrack) {
                       // A fast sprint can make BoT-SORT issue a new ID even
                       // though the appearance-verified local pose never left.
-                      // Re-bind only through that exact local pose center.
+                      // Re-bind through both local motion and the locked jersey
+                      // appearance, rather than accepting any crossing box.
                       selectedEnhancedTrackIdRef.current = identityTrack.id;
                     }
                   }
@@ -1291,10 +1317,9 @@ export default function PoseCanvas({
                   // If somebody crosses in front, reject their pose instead of
                   // allowing it to steal the selected identity. Missing frames
                   // are safer than analyzing the wrong athlete.
-                  const minimumSimilarity = enhancedRoi ? 0.24 : 0.52;
+                  const minimumSimilarity = enhancedRoi ? 0.44 : 0.52;
                   if (
                     gallery.length &&
-                    !insideDetectorCandidate &&
                     (!appearance || similarity < minimumSimilarity)
                   ) continue;
                   const score = similarity * 2.2 - d * 2.4;
@@ -1315,7 +1340,8 @@ export default function PoseCanvas({
                       enhancedTarget,
                       hipCenter
                     ) === 0;
-                  const continuousMatch = insideSelectedDetector ||
+                  const continuousMatch =
+                    (insideSelectedDetector && closestSimilarity >= 0.44) ||
                     (recentlyVisible &&
                       dist2D(center, identityCenter) < 0.12 &&
                       closestSimilarity >= 0.56);
@@ -1935,6 +1961,51 @@ export default function PoseCanvas({
     return createRegionalColorHistogram([torso, lower]);
   }
 
+  function sampleTrackAppearance(track) {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video?.videoHeight || !track) return null;
+    const boxWidth = track.x2 - track.x1;
+    const boxHeight = track.y2 - track.y1;
+    if (boxWidth <= 0 || boxHeight <= 0) return null;
+    if (!appearanceCanvasRef.current) {
+      appearanceCanvasRef.current = document.createElement("canvas");
+    }
+    const canvas = appearanceCanvasRef.current;
+    canvas.width = 48;
+    canvas.height = 96;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(
+      video,
+      track.x1 * video.videoWidth,
+      track.y1 * video.videoHeight,
+      boxWidth * video.videoWidth,
+      boxHeight * video.videoHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const torso = [];
+    const lower = [];
+    const copyRegion = (target, x1, y1, x2, y2) => {
+      for (let y = y1; y < y2; y += 2) {
+        for (let x = x1; x < x2; x += 2) {
+          const index = (y * canvas.width + x) * 4;
+          target.push(
+            image.data[index], image.data[index + 1],
+            image.data[index + 2], image.data[index + 3]
+          );
+        }
+      }
+    };
+    // Central body bands reduce court/background pixels while retaining jersey
+    // and shorts colors that remain useful when BoT-SORT changes numeric IDs.
+    copyRegion(torso, 10, 14, 38, 52);
+    copyRegion(lower, 12, 52, 36, 82);
+    return createRegionalColorHistogram([torso, lower]);
+  }
+
   function poseTorsoScale(pose) {
     if (!pose?.[11] || !pose?.[12] || !pose?.[23] || !pose?.[24]) return null;
     const shoulderWidth = dist2D(pose[11], pose[12]);
@@ -2038,7 +2109,7 @@ export default function PoseCanvas({
     };
   }
 
-  function lockPose(poseIndex, { forceRoi = false } = {}) {
+  function lockPose(poseIndex, { forceRoi = false, identityTrack = null } = {}) {
     const pose = lastPosesRef.current[poseIndex];
     const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(poseIndex);
     const center = hipCenter(pose);
@@ -2046,8 +2117,9 @@ export default function PoseCanvas({
     targetTrackIdRef.current = poseTrack.id;
     poseTrackerRef.current.touchTrack(poseTrack.id, performance.now());
     targetAnchorRef.current = center;
-    const appearance = samplePoseAppearance(pose);
-    targetAppearanceGalleryRef.current = appearance ? [appearance] : [];
+    const poseAppearance = samplePoseAppearance(pose);
+    const trackAppearance = sampleTrackAppearance(identityTrack);
+    targetAppearanceGalleryRef.current = [poseAppearance, trackAppearance].filter(Boolean);
     targetReacquireRef.current = null;
     targetTorsoScaleRef.current = poseTorsoScale(pose);
     targetSearchPhaseRef.current = 0;
@@ -2118,9 +2190,10 @@ export default function PoseCanvas({
       enhancedSelection,
       TRACKED_ROI_PADDING
     );
-    const directIndex = enhancedSelection
-      ? poseIndexInsideTrack(lastPosesRef.current, enhancedSelection, hipCenter)
-      : findPoseAtPoint(click);
+    // When a detector box was tapped, always run a tight close-up pose scan.
+    // Full-frame MediaPipe can merge landmarks from adjacent athletes even
+    // though the person detector has correctly separated their boxes.
+    const directIndex = enhancedSelection ? -1 : findPoseAtPoint(click);
     if (directIndex >= 0) {
       if (enhancedSelection) selectedEnhancedTrackIdRef.current = enhancedSelection.id;
       const locked = lockPose(directIndex, { forceRoi: Boolean(enhancedSelection) });
@@ -2149,6 +2222,7 @@ export default function PoseCanvas({
         );
         if (trackedPoseIndex < 0) return false;
         selectedPose = closeUpPoses[trackedPoseIndex];
+        if (!poseMatchesTrack(selectedPose, enhancedSelection)) return false;
       } else {
         selectedPose = closeUpPoses[0];
         let bestDistance = Infinity;
@@ -2174,7 +2248,10 @@ export default function PoseCanvas({
       }
       if (enhancedSelection) selectedEnhancedTrackIdRef.current = enhancedSelection.id;
       drawResults({ landmarks: merged });
-      const locked = lockPose(selectedIndex, { forceRoi: true });
+      const locked = lockPose(selectedIndex, {
+        forceRoi: true,
+        identityTrack: enhancedSelection,
+      });
       if (!locked && enhancedSelection) selectedEnhancedTrackIdRef.current = null;
       if (locked && enhancedRoi) targetAnchorRef.current = enhancedRoi.center;
       return locked;

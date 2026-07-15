@@ -34,6 +34,17 @@ function boxIou(a, b) {
   return intersection / Math.max(1, areaA + areaB - intersection);
 }
 
+function boxContainsCenter(container, item) {
+  const centerX = (item.xyxy[0] + item.xyxy[2]) / 2;
+  const centerY = (item.xyxy[1] + item.xyxy[3]) / 2;
+  return (
+    centerX >= container.xyxy[0] &&
+    centerX <= container.xyxy[2] &&
+    centerY >= container.xyxy[1] &&
+    centerY <= container.xyxy[3]
+  );
+}
+
 export function poseDetectionsFromLandmarks(poses, width, height) {
   if (!width || !height) return [];
   return (poses || []).flatMap((pose) => {
@@ -72,12 +83,62 @@ export function poseDetectionsFromLandmarks(poses, width, height) {
 }
 
 export function mergePersonDetections(detectorDetections, poseDetections) {
-  const verifiedPoses = poseDetections || [];
-  const remainingDetectorBoxes = (detectorDetections || []).filter(
-    (detection) =>
-      !verifiedPoses.some((poseDetection) => boxIou(detection, poseDetection) >= 0.45)
-  );
-  return [...verifiedPoses, ...remainingDetectorBoxes];
+  const detectorBoxes = detectorDetections || [];
+  const supplementalPoses = (poseDetections || []).filter((poseDetection) => {
+    // Multi-person pose models occasionally build one skeleton from two nearby
+    // athletes. That produces a broad pose box spanning multiple valid person
+    // detections and poisons the stateful tracker with a fake identity. Person
+    // detections therefore remain authoritative; pose boxes only fill genuine
+    // detector gaps.
+    const containedPeople = detectorBoxes.filter((detection) =>
+      boxContainsCenter(poseDetection, detection)
+    ).length;
+    if (containedPeople > 1) return false;
+    return !detectorBoxes.some(
+      (detection) =>
+        boxIou(detection, poseDetection) >= 0.08 ||
+        boxContainsCenter(detection, poseDetection) ||
+        boxContainsCenter(poseDetection, detection)
+    );
+  });
+  return [...detectorBoxes, ...supplementalPoses];
+}
+
+export function poseMatchesTrack(pose, track) {
+  if (!track || !Array.isArray(pose)) return false;
+  const core = [11, 12, 23, 24]
+    .map((index) => pose[index])
+    .filter(
+      (point) =>
+        point &&
+        Number.isFinite(point.x) &&
+        Number.isFinite(point.y) &&
+        (point.visibility == null || point.visibility >= 0.2)
+    );
+  if (core.length < 3) return false;
+
+  const width = track.x2 - track.x1;
+  const height = track.y2 - track.y1;
+  const marginX = Math.max(0.02, width * 0.35);
+  const marginY = Math.max(0.025, height * 0.18);
+  const insideCore = core.filter(
+    (point) =>
+      point.x >= track.x1 - marginX &&
+      point.x <= track.x2 + marginX &&
+      point.y >= track.y1 - marginY &&
+      point.y <= track.y2 + marginY
+  ).length;
+  if (insideCore < Math.ceil(core.length * 0.75)) return false;
+
+  const poseBox = poseDetectionsFromLandmarks([pose], 1000, 1000)[0];
+  if (!poseBox) return false;
+  const poseWidth = (poseBox.xyxy[2] - poseBox.xyxy[0]) / 1000;
+  const poseHeight = (poseBox.xyxy[3] - poseBox.xyxy[1]) / 1000;
+  // Arms and legs can extend beyond an upright detector box, but a pose that is
+  // several player-widths wider (or taller) is almost certainly cross-person.
+  if (poseWidth > Math.max(0.18, width * 3.6)) return false;
+  if (poseHeight > Math.max(0.45, height * 1.8)) return false;
+  return true;
 }
 
 export function normalizeTrackedBoxes(tracks, width, height) {
@@ -143,6 +204,7 @@ export function poseIndexInsideTrack(poses, track, centerForPose) {
   (poses || []).forEach((pose, index) => {
     const poseCenter = centerForPose(pose);
     if (!poseCenter) return;
+    if (Array.isArray(pose) && !poseMatchesTrack(pose, track)) return;
     const marginX = Math.max(0.015, (track.x2 - track.x1) * 0.12);
     const marginY = Math.max(0.02, (track.y2 - track.y1) * 0.08);
     if (

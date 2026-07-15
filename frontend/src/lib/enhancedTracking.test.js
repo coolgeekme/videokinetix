@@ -6,6 +6,7 @@ import {
   paddedTrackRoi,
   poseDetectionsFromLandmarks,
   poseIndexInsideTrack,
+  poseMatchesTrack,
 } from "./enhancedTracking";
 
 describe("enhanced athlete tracking helpers", () => {
@@ -87,14 +88,30 @@ describe("enhanced athlete tracking helpers", () => {
     expect(detections[0].xyxy[2]).toBeGreaterThan(0.5 * 640);
   });
 
-  test("prefers a pose-backed box over an overlapping detector box", () => {
+  test("keeps detector boxes authoritative and uses poses only for missed people", () => {
     const poseBox = { xyxy: [100, 40, 220, 300], confidence: 0.9 };
     const duplicate = { xyxy: [105, 45, 215, 295], confidence: 0.5 };
     const otherPlayer = { xyxy: [400, 40, 520, 300], confidence: 0.8 };
+    const missedPlayerPose = { xyxy: [250, 50, 330, 290], confidence: 0.85 };
 
-    expect(mergePersonDetections([duplicate, otherPlayer], [poseBox])).toEqual([
-      poseBox,
+    expect(mergePersonDetections(
+      [duplicate, otherPlayer],
+      [poseBox, missedPlayerPose]
+    )).toEqual([
+      duplicate,
       otherPlayer,
+      missedPlayerPose,
+    ]);
+  });
+
+  test("rejects a fused pose box spanning two detected athletes", () => {
+    const leftPlayer = { xyxy: [80, 40, 140, 300], confidence: 0.8 };
+    const rightPlayer = { xyxy: [210, 50, 270, 300], confidence: 0.8 };
+    const fusedPose = { xyxy: [70, 30, 280, 310], confidence: 0.95 };
+
+    expect(mergePersonDetections([leftPlayer, rightPlayer], [fusedPose])).toEqual([
+      leftPlayer,
+      rightPlayer,
     ]);
   });
 
@@ -119,5 +136,35 @@ describe("enhanced athlete tracking helpers", () => {
       (pose) => pose.center
     );
     expect(index).toBe(1);
+  });
+
+  test("rejects a skeleton whose core landmarks span neighboring players", () => {
+    const pose = Array.from({ length: 33 }, () => null);
+    pose[11] = { x: 0.2, y: 0.25, visibility: 0.9 };
+    pose[12] = { x: 0.42, y: 0.25, visibility: 0.9 };
+    pose[23] = { x: 0.21, y: 0.52, visibility: 0.9 };
+    pose[24] = { x: 0.43, y: 0.52, visibility: 0.9 };
+    pose[25] = { x: 0.22, y: 0.72, visibility: 0.9 };
+    pose[26] = { x: 0.44, y: 0.72, visibility: 0.9 };
+
+    expect(poseMatchesTrack(
+      pose,
+      { x1: 0.38, y1: 0.15, x2: 0.48, y2: 0.8 }
+    )).toBe(false);
+  });
+
+  test("accepts a coherent skeleton inside the selected player box", () => {
+    const pose = Array.from({ length: 33 }, () => null);
+    pose[11] = { x: 0.41, y: 0.25, visibility: 0.9 };
+    pose[12] = { x: 0.45, y: 0.25, visibility: 0.9 };
+    pose[23] = { x: 0.415, y: 0.5, visibility: 0.9 };
+    pose[24] = { x: 0.445, y: 0.5, visibility: 0.9 };
+    pose[25] = { x: 0.415, y: 0.68, visibility: 0.9 };
+    pose[26] = { x: 0.445, y: 0.68, visibility: 0.9 };
+
+    expect(poseMatchesTrack(
+      pose,
+      { x1: 0.38, y1: 0.15, x2: 0.48, y2: 0.8 }
+    )).toBe(true);
   });
 });
