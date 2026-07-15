@@ -189,6 +189,7 @@ export default function PoseCanvas({
   const personDetectorRef = useRef(null);
   const enhancedClientRef = useRef(null);
   const enhancedTracksRef = useRef([]);
+  const enhancedTracksUpdatedAtRef = useRef(0);
   const enhancedTrackingReadyRef = useRef(false);
   const selectedEnhancedTrackIdRef = useRef(null);
   const [enhancedTrackingState, setEnhancedTrackingState] = useState("loading");
@@ -521,8 +522,11 @@ export default function PoseCanvas({
       const poses = result?.landmarks || [];
       lastPosesRef.current = poses;
       const enhancedTracks = enhancedTracksRef.current;
+      const enhancedTrackingFresh =
+        enhancedTrackingReadyRef.current &&
+        Date.now() - enhancedTracksUpdatedAtRef.current < 1000;
       setPersonCount(
-        enhancedTrackingReadyRef.current ? enhancedTracks.length : poses.length
+        enhancedTrackingFresh ? enhancedTracks.length : poses.length
       );
       const forcedTrackId = result?.forcedTrackId ?? null;
       const poseTracks = poseTrackerRef.current.update(poses, performance.now(), {
@@ -563,7 +567,7 @@ export default function PoseCanvas({
           targetIdx = -1;
         }
       } else if (
-        enhancedTrackingReadyRef.current &&
+        enhancedTrackingFresh &&
         selectedEnhancedTrackIdRef.current != null
       ) {
         // The selected tracker ID is occluded/missing. Recording a gap is safer
@@ -582,7 +586,7 @@ export default function PoseCanvas({
 
       // Draw detector/tracker boxes first. These boxes are independent of pose
       // visibility, so a partially occluded athlete can remain selectable.
-      if (enhancedTrackingReadyRef.current) {
+      if (enhancedTrackingFresh) {
         enhancedTracks.forEach((track) => {
           const isTarget = track.id === selectedEnhancedTrackIdRef.current;
           const colour = isTarget
@@ -620,7 +624,7 @@ export default function PoseCanvas({
           : PERSON_COLORS[((poseTrack?.id || i + 1) - 1) % PERSON_COLORS.length];
 
         // A visible box makes it unambiguous which athletes are selectable.
-        const box = enhancedTrackingReadyRef.current ? null : poseTrack?.box;
+        const box = enhancedTrackingFresh ? null : poseTrack?.box;
         if (box) {
           const padX = 0.012;
           const padY = 0.018;
@@ -802,7 +806,7 @@ export default function PoseCanvas({
           t,
           lm: lm.map((p) => ({ x: p.x, y: p.y, visibility: p.visibility })),
           tracker_id: selectedEnhancedTrack?.id ?? targetTrackIdRef.current,
-          tracking_source: enhancedTrackingReadyRef.current ? "botsort" : "pose",
+          tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
           tracking_confidence: selectedEnhancedTrack?.confidence ?? null,
         });
         if (mode === "live" && Date.now() - lastThumbAtRef.current > 200) {
@@ -841,7 +845,7 @@ export default function PoseCanvas({
           t,
           lm: null,
           tracker_id: selectedEnhancedTrackIdRef.current ?? targetTrackIdRef.current,
-          tracking_source: enhancedTrackingReadyRef.current ? "botsort" : "pose",
+          tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
           occluded: true,
         });
       }
@@ -854,6 +858,7 @@ export default function PoseCanvas({
     poseTrackerRef.current.reset();
     lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
     enhancedTracksRef.current = [];
+    enhancedTracksUpdatedAtRef.current = 0;
     selectedEnhancedTrackIdRef.current = null;
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
@@ -1097,6 +1102,7 @@ export default function PoseCanvas({
                   if (cancelled || !tracks) return;
                   enhancedTrackingFailuresRef.current = 0;
                   enhancedTracksRef.current = tracks;
+                  enhancedTracksUpdatedAtRef.current = Date.now();
                   const selected = selectedEnhancedTrackIdRef.current == null
                     ? null
                     : tracks.find(
@@ -1128,8 +1134,11 @@ export default function PoseCanvas({
                   : enhancedTracksRef.current.find(
                       (track) => track.id === selectedEnhancedTrackIdRef.current
                     );
-                if (
+                const enhancedTrackingFresh =
                   enhancedTrackingReadyRef.current &&
+                  Date.now() - enhancedTracksUpdatedAtRef.current < 1000;
+                if (
+                  enhancedTrackingFresh &&
                   selectedEnhancedTrackIdRef.current != null &&
                   !enhancedTarget
                 ) {
@@ -1997,7 +2006,9 @@ export default function PoseCanvas({
   }
 
   async function findAndLockPoseAtPoint(click) {
-    const enhancedSelection = enhancedTrackingReadyRef.current
+    const enhancedSelection =
+      enhancedTrackingReadyRef.current &&
+      Date.now() - enhancedTracksUpdatedAtRef.current < 1000
       ? findTrackAtPoint(enhancedTracksRef.current, click)
       : null;
     const enhancedRoi = paddedTrackRoi(enhancedSelection);

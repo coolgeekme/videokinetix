@@ -1,4 +1,5 @@
 import {
+  EnhancedTrackingClient,
   findTrackAtPoint,
   normalizeTrackedBoxes,
   paddedTrackRoi,
@@ -6,6 +7,52 @@ import {
 } from "./enhancedTracking";
 
 describe("enhanced athlete tracking helpers", () => {
+  test("recreates a stale backend tracking session and retries the frame", async () => {
+    const api = {
+      get: jest.fn().mockResolvedValue({ data: { ready: true } }),
+      post: jest
+        .fn()
+        .mockRejectedValueOnce({ response: { status: 404 } })
+        .mockResolvedValueOnce({
+          data: { session_id: "fresh-session", engine: "roboflow-botsort" },
+        })
+        .mockResolvedValueOnce({
+          data: {
+            tracks: [
+              {
+                tracker_id: 9,
+                confirmed: true,
+                confidence: 0.9,
+                xyxy: [64, 36, 192, 324],
+              },
+            ],
+          },
+        }),
+    };
+    const client = new EnhancedTrackingClient(api);
+    client.sessionId = "stale-session";
+    client.canvas = {
+      width: 0,
+      height: 0,
+      getContext: () => ({ drawImage: jest.fn() }),
+      toBlob: (callback) => callback(new Blob(["frame"], { type: "image/jpeg" })),
+    };
+    const video = { videoWidth: 640, videoHeight: 360 };
+    const detector = { detectForVideo: jest.fn().mockReturnValue({ detections: [] }) };
+
+    const tracks = await client.process(video, detector, 1000);
+
+    expect(client.sessionId).toBe("fresh-session");
+    expect(api.post.mock.calls.map(([url]) => url)).toEqual([
+      "/tracking/sessions/stale-session/frame",
+      "/tracking/sessions",
+      "/tracking/sessions/fresh-session/frame",
+    ]);
+    expect(tracks).toEqual([
+      { id: 9, confidence: 0.9, x1: 0.1, y1: 0.1, x2: 0.3, y2: 0.9 },
+    ]);
+  });
+
   test("normalizes only confirmed Supervision tracks", () => {
     const tracks = normalizeTrackedBoxes(
       [
@@ -43,4 +90,3 @@ describe("enhanced athlete tracking helpers", () => {
     expect(index).toBe(1);
   });
 });
-

@@ -116,6 +116,11 @@ export class EnhancedTrackingClient {
     return { ready: true, ...created.data };
   }
 
+  async restart() {
+    this.sessionId = null;
+    return this.start();
+  }
+
   async stop() {
     const sessionId = this.sessionId;
     this.sessionId = null;
@@ -155,11 +160,23 @@ export class EnhancedTrackingClient {
       form.append("detections", JSON.stringify({ detections }));
       form.append("timestamp", String(timestampMs / 1000));
       form.append("frame", blob, "tracking-frame.jpg");
-      const response = await this.api.post(
-        `/tracking/sessions/${this.sessionId}/frame`,
-        form,
-        { headers: { "Content-Type": "multipart/form-data" }, timeout: 15000 }
-      );
+      const postFrame = () =>
+        this.api.post(`/tracking/sessions/${this.sessionId}/frame`, form, {
+          headers: { "Content-Type": "multipart/form-data" },
+          timeout: 15000,
+        });
+      let response;
+      try {
+        response = await postFrame();
+      } catch (error) {
+        if (error?.response?.status !== 404) throw error;
+        // The local/dev tracking service stores sessions in memory. A server
+        // restart invalidates the page's old ID, so transparently create a new
+        // tracker and retry this frame instead of disabling motion capture.
+        const restarted = await this.restart();
+        if (!restarted?.ready || !this.sessionId) throw error;
+        response = await postFrame();
+      }
       return normalizeTrackedBoxes(response.data?.tracks, width, height);
     } finally {
       this.inFlight = false;
