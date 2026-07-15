@@ -382,7 +382,10 @@ export default function PoseCanvas({
       const poses = result?.landmarks || [];
       lastPosesRef.current = poses;
       setPersonCount(poses.length);
-      const poseTracks = poseTrackerRef.current.update(poses, performance.now());
+      const forcedTrackId = result?.forcedTrackId ?? null;
+      const poseTracks = poseTrackerRef.current.update(poses, performance.now(), {
+        forcedTrackId,
+      });
       lastPoseTracksRef.current = poseTracks;
 
       // Resolve the selected persistent track ID to this frame's pose.
@@ -830,8 +833,20 @@ export default function PoseCanvas({
                 // This replaces full-frame pose inference after selection, while
                 // ball detection continues to use the complete video frame.
                 const targetedPoses = detectPosesNearPoint(targetAnchorRef.current);
-                result = targetedPoses.length
-                  ? { landmarks: targetedPoses }
+                let closestTarget = null;
+                let closestDistance = Infinity;
+                for (const pose of targetedPoses) {
+                  const d = dist2D(hipCenter(pose), targetAnchorRef.current);
+                  if (d < closestDistance) {
+                    closestDistance = d;
+                    closestTarget = pose;
+                  }
+                }
+                result = closestTarget
+                  ? {
+                      landmarks: [closestTarget],
+                      forcedTrackId: targetTrackIdRef.current,
+                    }
                   : lm.detectForVideo(v, nextPoseTimestamp());
               } else if (zoom > 1.001) {
                 // Crop the visible zoom window into an offscreen canvas

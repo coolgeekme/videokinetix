@@ -149,7 +149,24 @@ export class PoseIdentityTracker {
     return true;
   }
 
-  update(poses, nowMs = performance.now()) {
+  assignObservation(track, candidate, nowMs) {
+    const dt = Math.max(0.016, (nowMs - track.updatedAt) / 1000);
+    const rawVx = (candidate.center.x - track.center.x) / dt;
+    const rawVy = (candidate.center.y - track.center.y) / dt;
+    const velocityAlpha = 0.45;
+    track.vx = velocityAlpha * rawVx + (1 - velocityAlpha) * track.vx;
+    track.vy = velocityAlpha * rawVy + (1 - velocityAlpha) * track.vy;
+    track.center = candidate.center;
+    track.box = candidate.box;
+    track.scale = 0.65 * candidate.scale + 0.35 * track.scale;
+    track.shape = candidate.shape;
+    track.poseIndex = candidate.poseIndex;
+    track.landmarks = candidate.landmarks;
+    track.updatedAt = nowMs;
+    track.lastSeenAt = nowMs;
+  }
+
+  update(poses, nowMs = performance.now(), { forcedTrackId = null } = {}) {
     const observations = (poses || [])
       .map((landmarks, poseIndex) => observation(landmarks, poseIndex))
       .filter(Boolean);
@@ -163,8 +180,22 @@ export class PoseIdentityTracker {
       }
     }
 
+    const matchedTrackIds = new Set();
+    const matchedObservationIndexes = new Set();
+
+    // A targeted ROI is created from the exact athlete the user selected. Its
+    // single detection should retain that identity even when crouching/running
+    // changes the pose shape too sharply for ordinary geometric matching.
+    const forcedTrack = forcedTrackId != null ? this.tracks.get(forcedTrackId) : null;
+    if (forcedTrack && observations.length === 1) {
+      this.assignObservation(forcedTrack, observations[0], nowMs);
+      matchedTrackIds.add(forcedTrack.id);
+      matchedObservationIndexes.add(0);
+    }
+
     const pairs = [];
     for (const track of this.tracks.values()) {
+      if (matchedTrackIds.has(track.id)) continue;
       const elapsedSeconds = Math.min(0.6, Math.max(0, nowMs - track.updatedAt) / 1000);
       const missedSeconds = Math.max(0, nowMs - track.lastSeenAt) / 1000;
       const dx = track.vx * elapsedSeconds;
@@ -201,8 +232,6 @@ export class PoseIdentityTracker {
     // Global lowest-cost assignment prevents selection order from deciding who
     // owns an ambiguous pose when athletes cross paths.
     pairs.sort((a, b) => a.cost - b.cost);
-    const matchedTrackIds = new Set();
-    const matchedObservationIndexes = new Set();
     for (const pair of pairs) {
       if (
         matchedTrackIds.has(pair.track.id) ||
@@ -210,20 +239,7 @@ export class PoseIdentityTracker {
       ) continue;
 
       const { track, candidate } = pair;
-      const dt = Math.max(0.016, (nowMs - track.updatedAt) / 1000);
-      const rawVx = (candidate.center.x - track.center.x) / dt;
-      const rawVy = (candidate.center.y - track.center.y) / dt;
-      const velocityAlpha = 0.45;
-      track.vx = velocityAlpha * rawVx + (1 - velocityAlpha) * track.vx;
-      track.vy = velocityAlpha * rawVy + (1 - velocityAlpha) * track.vy;
-      track.center = candidate.center;
-      track.box = candidate.box;
-      track.scale = 0.65 * candidate.scale + 0.35 * track.scale;
-      track.shape = candidate.shape;
-      track.poseIndex = candidate.poseIndex;
-      track.landmarks = candidate.landmarks;
-      track.updatedAt = nowMs;
-      track.lastSeenAt = nowMs;
+      this.assignObservation(track, candidate, nowMs);
       matchedTrackIds.add(track.id);
       matchedObservationIndexes.add(pair.observationIndex);
     }

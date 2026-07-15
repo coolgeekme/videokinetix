@@ -77,4 +77,20 @@ describe("PoseIdentityTracker", () => {
     result = tracker.update([makePose(0.41)], 5040);
     expect(result.byPoseIndex.get(0).id).toBe(selectedId);
   });
+
+  test("binds a targeted ROI pose to the selected identity", () => {
+    const tracker = new PoseIdentityTracker();
+    let result = tracker.update([makePose(0.45)], 0);
+    const selectedId = result.byPoseIndex.get(0).id;
+
+    // Simulate the large geometry change between a crouched full-frame pose
+    // and the first close-up moving frame. Ordinary matching may reject this,
+    // but the user-selected ROI is authoritative.
+    result = tracker.update([makePose(0.7, 0.62, 0.55)], 40, {
+      forcedTrackId: selectedId,
+    });
+
+    expect(result.byPoseIndex.get(0).id).toBe(selectedId);
+    expect(result.tracks.filter((track) => track.landmarks)).toHaveLength(1);
+  });
 });
