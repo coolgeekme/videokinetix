@@ -37,13 +37,14 @@ export function assessFrameQuality(poses, { sport } = {}) {
   const avgVis = visN ? visSum / visN : 0;
   if (avgVis < 0.4) issues.push("Low pose confidence — improve lighting");
 
-  // 3) Athlete too small in frame (bounding box height < 35% of canvas)
+  // 3) Athlete too small in frame. Modern 1080p+ uploads can still provide
+  // useful landmarks at ~20% frame height, so only warn below that point.
   if (headVis && feetVis) {
     const topY = Math.min(head.y, (primary[11]?.y ?? 1), (primary[12]?.y ?? 1));
     const botY = Math.max(ankleL?.y ?? 0, ankleR?.y ?? 0);
     const heightPct = botY - topY;
-    if (heightPct < 0.35) {
-      issues.push("Athlete too far — move camera closer");
+    if (heightPct < 0.2) {
+      issues.push("Athlete very small — zoom in or move camera closer");
     } else if (heightPct > 0.95) {
       issues.push("Too close — step camera back");
     }

@@ -118,6 +118,14 @@ export default function PoseCanvas({
   // time AND skip duplicate frames in upload mode via currentTime delta.
   const lastDetectAtRef = useRef(0);
   const lastDetectVideoTimeRef = useRef(-1);
+  const lastPoseTimestampRef = useRef(0);
+
+  function nextPoseTimestamp() {
+    const now = performance.now();
+    const next = Math.max(now, lastPoseTimestampRef.current + 0.01);
+    lastPoseTimestampRef.current = next;
+    return next;
+  }
 
   // Video recording (Phase C) — only used when saveVideo === true
   const compositeCanvasRef = useRef(null);
@@ -140,9 +148,11 @@ export default function PoseCanvas({
   if (!poseTrackerRef.current) poseTrackerRef.current = new PoseIdentityTracker();
   const lastPoseTracksRef = useRef({ byPoseIndex: new Map(), tracks: [] });
   const targetTrackIdRef = useRef(null); // persistent identity selected by the user
+  const targetUsesRoiRef = useRef(false); // close-up inference for small/far athletes
   const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
   const [hasTarget, setHasTarget] = useState(false);
+  const [findingAthlete, setFindingAthlete] = useState(false);
   const [trackingLost, setTrackingLost] = useState(false);
   const [personCount, setPersonCount] = useState(0);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
@@ -375,14 +385,6 @@ export default function PoseCanvas({
       const poseTracks = poseTrackerRef.current.update(poses, performance.now());
       lastPoseTracksRef.current = poseTracks;
 
-      // Frame quality (throttled to 500ms) — gives users live feedback on
-      // whether their camera setup is producing analyzable footage.
-      const nowQ = performance.now();
-      if (nowQ - lastQualityUpdateRef.current > 500) {
-        lastQualityUpdateRef.current = nowQ;
-        setFrameQuality(assessFrameQuality(poses, { sport }));
-      }
-
       // Resolve the selected persistent track ID to this frame's pose.
       let targetIdx = -1;
       const targetTrack = targetTrackIdRef.current != null
@@ -393,6 +395,16 @@ export default function PoseCanvas({
         targetAnchorRef.current = targetTrack.center;
         lastSeenAtRef.current = Date.now();
       }
+
+      // Once an athlete is selected, quality feedback must describe that
+      // athlete—not whichever detection MediaPipe happened to return first.
+      const nowQ = performance.now();
+      if (nowQ - lastQualityUpdateRef.current > 500) {
+        lastQualityUpdateRef.current = nowQ;
+        const qualityPoses = targetIdx >= 0 ? [poses[targetIdx]] : poses;
+        setFrameQuality(assessFrameQuality(qualityPoses, { sport }));
+      }
+
       // Draw all poses; highlight the target
       poses.forEach((lm, i) => {
         const isTarget = i === targetIdx;
@@ -400,6 +412,36 @@ export default function PoseCanvas({
         const colour = isTarget
           ? TARGET_COLOR
           : PERSON_COLORS[((poseTrack?.id || i + 1) - 1) % PERSON_COLORS.length];
+
+        // A visible box makes it unambiguous which athletes are selectable.
+        const box = poseTrack?.box;
+        if (box) {
+          const padX = 0.012;
+          const padY = 0.018;
+          const x1 = Math.max(0, box.x1 - padX) * w;
+          const y1 = Math.max(0, box.y1 - padY) * h;
+          const x2 = Math.min(1, box.x2 + padX) * w;
+          const y2 = Math.min(1, box.y2 + padY) * h;
+          const label = isTarget ? "SELECTED" : `ATHLETE ${poseTrack.id}`;
+          ctx.save();
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = colour;
+          ctx.lineWidth = isTarget ? 5 : 3;
+          ctx.shadowColor = colour;
+          ctx.shadowBlur = isTarget ? 12 : 5;
+          ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          ctx.shadowBlur = 0;
+          ctx.font = "bold 13px sans-serif";
+          const labelWidth = ctx.measureText(label).width + 14;
+          ctx.fillStyle = colour;
+          ctx.fillRect(x1, Math.max(0, y1 - 22), labelWidth, 22);
+          ctx.fillStyle = "#050505";
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          ctx.fillText(label, x1 + 7, Math.max(11, y1 - 11));
+          ctx.restore();
+        }
+
         ctx.lineWidth = isTarget ? 5 : 2;
         ctx.strokeStyle = colour;
         ctx.shadowColor = colour;
@@ -423,22 +465,6 @@ export default function PoseCanvas({
           ctx.arc(p.x * w, p.y * h, isTarget ? 5 : 3, 0, Math.PI * 2);
           ctx.fill();
         });
-        // person number badge (above head)
-        const head = lm[0];
-        if (head && !isTarget) {
-          const px = head.x * w;
-          const py = head.y * h - 24;
-          ctx.globalAlpha = 1;
-          ctx.fillStyle = colour;
-          ctx.beginPath();
-          ctx.arc(px, py, 14, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = "#000";
-          ctx.font = "bold 16px sans-serif";
-          ctx.textAlign = "center";
-          ctx.textBaseline = "middle";
-          ctx.fillText(String(poseTrack?.id || i + 1), px, py);
-        }
         ctx.globalAlpha = 1;
       });
 
@@ -605,7 +631,7 @@ export default function PoseCanvas({
         framesRef.current.push({ t, lm: null });
       }
     },
-    [mode, isFrontCam, trackingLost]
+    [mode, isFrontCam, trackingLost, sport]
   );
 
   /* ---------------- Reset target tracking when video source changes ---------------- */
@@ -613,6 +639,7 @@ export default function PoseCanvas({
     poseTrackerRef.current.reset();
     lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
     targetTrackIdRef.current = null;
+    targetUsesRoiRef.current = false;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
@@ -633,6 +660,7 @@ export default function PoseCanvas({
       lastShotEndT: -Infinity,
     };
     setHasTarget(false);
+    setFindingAthlete(false);
     setTrackingLost(false);
     setPersonCount(0);
     setHoopRoi(null);
@@ -797,7 +825,15 @@ export default function PoseCanvas({
             lastDetectVideoTimeRef.current = v.currentTime;
             try {
               let result;
-              if (zoom > 1.001) {
+              if (targetUsesRoiRef.current && targetAnchorRef.current) {
+                // Small athletes get one targeted close-up inference per frame.
+                // This replaces full-frame pose inference after selection, while
+                // ball detection continues to use the complete video frame.
+                const targetedPoses = detectPosesNearPoint(targetAnchorRef.current);
+                result = targetedPoses.length
+                  ? { landmarks: targetedPoses }
+                  : lm.detectForVideo(v, nextPoseTimestamp());
+              } else if (zoom > 1.001) {
                 // Crop the visible zoom window into an offscreen canvas
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
                 const tw = 640;
@@ -811,7 +847,7 @@ export default function PoseCanvas({
                 const sw = v.videoWidth / zoom;
                 const sh = v.videoHeight / zoom;
                 cctx.drawImage(v, sx, sy, sw, sh, 0, 0, tw, th);
-                result = lm.detectForVideo(cc, performance.now());
+                result = lm.detectForVideo(cc, nextPoseTimestamp());
                 if (result && result.landmarks) {
                   result = {
                     ...result,
@@ -831,7 +867,7 @@ export default function PoseCanvas({
                 // Full-frame is reliable and fast enough for single-athlete
                 // tracking during playback; persistent pose IDs in drawResults()
                 // keep the locked target identified.
-                result = lm.detectForVideo(v, performance.now());
+                result = lm.detectForVideo(v, nextPoseTimestamp());
               } else {
                 // Selection (live or upload, no zoom): single full-frame detection.
                 // Tile detection (used to surface tiny far athletes in 2-athlete
@@ -839,7 +875,7 @@ export default function PoseCanvas({
                 // and silently failing — single full-frame is reliable for the
                 // typical 1-athlete case. Multi-athlete deep-scan can be re-added
                 // as an optional toggle later.
-                result = lm.detectForVideo(v, performance.now());
+                result = lm.detectForVideo(v, nextPoseTimestamp());
               }
               drawResults(result);
 
@@ -1208,22 +1244,167 @@ export default function PoseCanvas({
   };
 
   /* ---------------- Subject / hoop selection click handler ---------------- */
-  const handleCanvasClick = (e) => {
-    if (running) return;
+  function clientPointToVideoNorm(e) {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const video = videoRef.current;
+    if (!canvas || !video?.videoWidth || !video?.videoHeight) return null;
     const rect = canvas.getBoundingClientRect();
-    // Click position within the visible canvas (screen, post-transform)
-    const wx = (e.clientX - rect.left) / rect.width; // 0..1 visible
-    const wy = (e.clientY - rect.top) / rect.height;
-    // Convert to full-frame normalized coords (account for zoom/pan)
-    let nx = pan.x + wx / zoom;
-    let ny = pan.y + wy / zoom;
-    // Mirror compensation (front camera flip is applied via CSS scaleX(-1))
-    if (mode === "live" && isFrontCam) {
-      nx = pan.x + (1 - wx) / zoom;
+    const videoAspect = video.videoWidth / video.videoHeight;
+    const rectAspect = rect.width / rect.height;
+    let contentWidth = rect.width;
+    let contentHeight = rect.height;
+    let offsetX = 0;
+    let offsetY = 0;
+    if (videoAspect > rectAspect) {
+      contentHeight = rect.width / videoAspect;
+      offsetY = (rect.height - contentHeight) / 2;
+    } else {
+      contentWidth = rect.height * videoAspect;
+      offsetX = (rect.width - contentWidth) / 2;
     }
-    const click = { x: nx, y: ny };
+    let x = (e.clientX - rect.left - offsetX) / contentWidth;
+    const y = (e.clientY - rect.top - offsetY) / contentHeight;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    if (mode === "live" && isFrontCam) x = 1 - x;
+    return { x, y };
+  }
+
+  function findPoseAtPoint(click) {
+    const tracking = lastPoseTracksRef.current;
+    const inside = [];
+    for (const [poseIndex, track] of tracking.byPoseIndex.entries()) {
+      const box = track.box;
+      if (!box) continue;
+      const pad = 0.025;
+      if (
+        click.x >= box.x1 - pad && click.x <= box.x2 + pad &&
+        click.y >= box.y1 - pad && click.y <= box.y2 + pad
+      ) {
+        inside.push({ poseIndex, area: box.width * box.height });
+      }
+    }
+    if (inside.length) {
+      inside.sort((a, b) => a.area - b.area);
+      return inside[0].poseIndex;
+    }
+
+    // Allow a small near-box margin, but never select somebody halfway across
+    // the court. A miss falls through to close-up detection at the tap point.
+    let nearestIndex = -1;
+    let nearestDistance = 0.12;
+    for (const [poseIndex, track] of tracking.byPoseIndex.entries()) {
+      const d = dist2D(track.center, click);
+      if (d < nearestDistance) {
+        nearestDistance = d;
+        nearestIndex = poseIndex;
+      }
+    }
+    return nearestIndex;
+  }
+
+  function lockPose(poseIndex, { forceRoi = false } = {}) {
+    const pose = lastPosesRef.current[poseIndex];
+    const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(poseIndex);
+    const center = hipCenter(pose);
+    if (!center || !poseTrack) return false;
+    targetTrackIdRef.current = poseTrack.id;
+    poseTrackerRef.current.touchTrack(poseTrack.id, performance.now());
+    targetAnchorRef.current = center;
+    targetUsesRoiRef.current = forceRoi || (poseTrack.box?.height || 1) < 0.35;
+    lastSeenAtRef.current = Date.now();
+    setHasTarget(true);
+    setTrackingLost(false);
+    setError(null);
+    setPlacementStep(sport === "basketball" ? "hoop" : "ready");
+    // Paused uploads do not produce another animation frame, so repaint the
+    // current detections immediately to turn the chosen box green.
+    requestAnimationFrame(() => {
+      drawResults({ landmarks: lastPosesRef.current });
+    });
+    return true;
+  }
+
+  function detectPosesNearPoint(point) {
+    const lm = landmarkerRef.current;
+    const video = videoRef.current;
+    if (!lm || !video?.videoWidth || !video?.videoHeight) return [];
+    const cropWidth = 0.42;
+    const cropHeight = 0.82;
+    const cropX = Math.max(0, Math.min(1 - cropWidth, point.x - cropWidth / 2));
+    const cropY = Math.max(0, Math.min(1 - cropHeight, point.y - cropHeight * 0.52));
+    const scan = document.createElement("canvas");
+    scan.width = 512;
+    scan.height = Math.max(
+      384,
+      Math.min(
+        768,
+        Math.round(scan.width * (cropHeight * video.videoHeight) / (cropWidth * video.videoWidth))
+      )
+    );
+    const scanCtx = scan.getContext("2d");
+    scanCtx.drawImage(
+      video,
+      cropX * video.videoWidth,
+      cropY * video.videoHeight,
+      cropWidth * video.videoWidth,
+      cropHeight * video.videoHeight,
+      0,
+      0,
+      scan.width,
+      scan.height
+    );
+    const result = lm.detectForVideo(scan, nextPoseTimestamp());
+    return (result?.landmarks || []).map((pose) =>
+      pose.map((landmark) => ({
+        ...landmark,
+        x: cropX + landmark.x * cropWidth,
+        y: cropY + landmark.y * cropHeight,
+      }))
+    );
+  }
+
+  async function findAndLockPoseAtPoint(click) {
+    const directIndex = findPoseAtPoint(click);
+    if (directIndex >= 0) return lockPose(directIndex);
+
+    setFindingAthlete(true);
+    try {
+      // Yield once so the "Finding athlete" state paints before inference.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      const closeUpPoses = detectPosesNearPoint(click);
+      if (!closeUpPoses.length) return false;
+      let selectedPose = closeUpPoses[0];
+      let bestDistance = Infinity;
+      for (const pose of closeUpPoses) {
+        const center = hipCenter(pose);
+        const d = dist2D(center, click);
+        if (d < bestDistance) {
+          bestDistance = d;
+          selectedPose = pose;
+        }
+      }
+
+      const merged = [...lastPosesRef.current];
+      const selectedCenter = hipCenter(selectedPose);
+      let selectedIndex = merged.findIndex(
+        (pose) => dist2D(hipCenter(pose), selectedCenter) < 0.06
+      );
+      if (selectedIndex >= 0) merged[selectedIndex] = selectedPose;
+      else {
+        selectedIndex = merged.length;
+        merged.push(selectedPose);
+      }
+      drawResults({ landmarks: merged });
+      return lockPose(selectedIndex, { forceRoi: true });
+    } finally {
+      setFindingAthlete(false);
+    }
+  }
+
+  const handleCanvasClick = async (e) => {
+    if (running) return;
+    const click = clientPointToVideoNorm(e);
+    if (!click) return;
 
     // Step 2 (basketball only): place hoop ROI centered on click
     if (placementStep === "hoop") {
@@ -1272,43 +1453,18 @@ export default function PoseCanvas({
       }
     }
 
-    // Step 1: pick athlete by tap-nearest pose
-    const poses = lastPosesRef.current;
-    if (!poses.length) return;
-    let bestIdx = -1;
-    let bestDist = Infinity;
-    poses.forEach((lm, i) => {
-      const pts = [11, 12, 23, 24].map((k) => lm[k]).filter(Boolean);
-      if (!pts.length) return;
-      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
-      const d = dist2D({ x: cx, y: cy }, click);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
-    });
-    // Click radius scales inversely with zoom but is generous on mobile —
-    // the original 0.25 was too tight on small screens. 0.4 = nearly half
-    // the canvas width, but bestDist comparison still picks the closest pose.
-    if (bestIdx >= 0 && bestDist < 0.4 / zoom) {
-      const c = hipCenter(poses[bestIdx]);
-      const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(bestIdx);
-      if (c && poseTrack) {
-        targetTrackIdRef.current = poseTrack.id;
-        targetAnchorRef.current = c;
-        lastSeenAtRef.current = Date.now();
-        setHasTarget(true);
-        setTrackingLost(false);
-        // Basketball: prompt the user to place the hoop next
-        setPlacementStep(sport === "basketball" ? "hoop" : "ready");
-      }
+    const locked = await findAndLockPoseAtPoint(click);
+    if (!locked) {
+      setError(
+        "No athlete detected at that spot. Pause on a clear full-body frame, then tap the athlete again."
+      );
     }
   };
 
   const clearTarget = () => {
     if (running) return;
     targetTrackIdRef.current = null;
+    targetUsesRoiRef.current = false;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     setHasTarget(false);
@@ -1674,7 +1830,7 @@ export default function PoseCanvas({
           <video
             ref={videoRef}
             data-testid="pose-video"
-            className="absolute inset-0 w-full h-full object-cover"
+            className="absolute inset-0 w-full h-full object-contain"
             style={{
               transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
             }}
@@ -1686,7 +1842,7 @@ export default function PoseCanvas({
             ref={canvasRef}
             data-testid="pose-canvas"
             onClick={handleCanvasClickGuarded}
-            className="absolute inset-0 w-full h-full cursor-crosshair"
+            className="absolute inset-0 w-full h-full object-contain cursor-crosshair"
             style={{
               transform: mode === "live" && isFrontCam ? "scaleX(-1)" : "none",
               pointerEvents: "auto",
@@ -1795,9 +1951,11 @@ export default function PoseCanvas({
             <Target className="w-3.5 h-3.5 text-[#ff3b30] flex-shrink-0" />
             <div className="text-[10px] sm:text-[11px] uppercase tracking-widest font-display font-bold text-white whitespace-nowrap overflow-hidden text-ellipsis">
               {placementStep === "athlete"
-                ? personCount === 0
-                  ? "Position athlete in frame"
-                  : `Tap athlete (${personCount})`
+                ? findingAthlete
+                  ? "Finding athlete…"
+                  : personCount === 0
+                    ? "Tap an athlete to scan that area"
+                    : `Tap inside an athlete box (${personCount})`
                 : "Tap the rim"}
             </div>
           </div>
@@ -2064,7 +2222,7 @@ export default function PoseCanvas({
         )}
         {!hasTarget && status === "ready" && (
           <span className="self-center text-xs text-zinc-500 font-mono">
-            ↑ Tap the athlete in the preview to enable Start
+            ↑ Tap inside an athlete box—or tap any athlete to scan that area
           </span>
         )}
       </div>
