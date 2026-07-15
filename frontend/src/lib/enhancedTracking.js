@@ -2,6 +2,9 @@ import axios from "axios";
 import { api } from "./api";
 
 const TRACK_FRAME_WIDTH = 640;
+const POSE_BOX_LANDMARKS = [
+  11, 12, 13, 14, 15, 16, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+];
 const trackingBackendUrl = process.env.REACT_APP_TRACKING_BACKEND_URL;
 const trackingApi = trackingBackendUrl
   ? axios.create({
@@ -18,6 +21,63 @@ function canvasBlob(canvas) {
       0.62
     );
   });
+}
+
+function boxIou(a, b) {
+  const x1 = Math.max(a.xyxy[0], b.xyxy[0]);
+  const y1 = Math.max(a.xyxy[1], b.xyxy[1]);
+  const x2 = Math.min(a.xyxy[2], b.xyxy[2]);
+  const y2 = Math.min(a.xyxy[3], b.xyxy[3]);
+  const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+  const areaA = (a.xyxy[2] - a.xyxy[0]) * (a.xyxy[3] - a.xyxy[1]);
+  const areaB = (b.xyxy[2] - b.xyxy[0]) * (b.xyxy[3] - b.xyxy[1]);
+  return intersection / Math.max(1, areaA + areaB - intersection);
+}
+
+export function poseDetectionsFromLandmarks(poses, width, height) {
+  if (!width || !height) return [];
+  return (poses || []).flatMap((pose) => {
+    const points = POSE_BOX_LANDMARKS
+      .map((index) => pose?.[index])
+      .filter(
+        (point) =>
+          point &&
+          Number.isFinite(point.x) &&
+          Number.isFinite(point.y) &&
+          (point.visibility == null || point.visibility >= 0.15)
+      );
+    if (points.length < 5) return [];
+    const xs = points.map((point) => point.x * width);
+    const ys = points.map((point) => point.y * height);
+    const rawX1 = Math.min(...xs);
+    const rawY1 = Math.min(...ys);
+    const rawX2 = Math.max(...xs);
+    const rawY2 = Math.max(...ys);
+    const boxWidth = Math.max(4, rawX2 - rawX1);
+    const boxHeight = Math.max(8, rawY2 - rawY1);
+    const visibility = points.reduce(
+      (sum, point) => sum + (point.visibility ?? 0.8),
+      0
+    ) / points.length;
+    return [{
+      xyxy: [
+        Math.max(0, rawX1 - boxWidth * 0.16),
+        Math.max(0, rawY1 - boxHeight * 0.14),
+        Math.min(width, rawX2 + boxWidth * 0.16),
+        Math.min(height, rawY2 + boxHeight * 0.1),
+      ],
+      confidence: Math.max(0.55, Math.min(0.98, visibility)),
+    }];
+  });
+}
+
+export function mergePersonDetections(detectorDetections, poseDetections) {
+  const verifiedPoses = poseDetections || [];
+  const remainingDetectorBoxes = (detectorDetections || []).filter(
+    (detection) =>
+      !verifiedPoses.some((poseDetection) => boxIou(detection, poseDetection) >= 0.45)
+  );
+  return [...verifiedPoses, ...remainingDetectorBoxes];
 }
 
 export function normalizeTrackedBoxes(tracks, width, height) {
@@ -132,7 +192,7 @@ export class EnhancedTrackingClient {
     }
   }
 
-  async process(video, detector, timestampMs) {
+  async process(video, detector, timestampMs, poses = []) {
     if (!this.sessionId || !video?.videoWidth || !detector || this.inFlight) return null;
     this.inFlight = true;
     try {
@@ -143,7 +203,7 @@ export class EnhancedTrackingClient {
       const context = this.canvas.getContext("2d");
       context.drawImage(video, 0, 0, width, height);
       const result = detector.detectForVideo(this.canvas, timestampMs);
-      const detections = (result?.detections || []).map((detection) => {
+      const detectorDetections = (result?.detections || []).map((detection) => {
         const box = detection.boundingBox;
         return {
           xyxy: [
@@ -155,6 +215,11 @@ export class EnhancedTrackingClient {
           confidence: detection.categories?.[0]?.score ?? 0,
         };
       });
+      const poseDetections = poseDetectionsFromLandmarks(poses, width, height);
+      const detections = mergePersonDetections(
+        detectorDetections,
+        poseDetections
+      );
       const blob = await canvasBlob(this.canvas);
       const form = new FormData();
       form.append("detections", JSON.stringify({ detections }));

@@ -3,8 +3,10 @@ from types import SimpleNamespace
 import pytest
 
 from tracking_service import (
+    BOT_SORT_OPTIONS,
     TrackingSessionManager,
     TrackingSessionNotFoundError,
+    create_botsort_tracker,
     validate_detections,
 )
 
@@ -32,6 +34,19 @@ def manager(clock=lambda: 100.0):
         frame_decoder=lambda data: f"decoded:{len(data)}",
         clock=clock,
     )
+
+
+def test_uses_low_fps_fast_motion_botsort_profile():
+    class FakeBoTSORT:
+        def __init__(self, **options):
+            self.options = options
+
+    tracker = create_botsort_tracker(FakeBoTSORT)
+
+    assert tracker.options == BOT_SORT_OPTIONS
+    assert tracker.options["frame_rate"] == 7.0
+    assert tracker.options["minimum_iou_threshold_first_assoc"] < 0.1
+    assert tracker.options["minimum_consecutive_frames"] == 1
 
 
 def test_validates_and_clamps_browser_detections():
@@ -96,4 +111,3 @@ def test_expires_inactive_sessions():
     now[0] = 11.0
     with pytest.raises(TrackingSessionNotFoundError):
         service.update_session("user-a", session_id, [])
-

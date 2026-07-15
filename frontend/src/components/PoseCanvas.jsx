@@ -3,6 +3,7 @@ import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, 
 import { assessFrameQuality } from "../lib/frameQuality";
 import { PoseIdentityTracker } from "../lib/poseIdentityTracker";
 import {
+  blendAppearance,
   bestAppearanceSimilarity,
   createRegionalColorHistogram,
 } from "../lib/appearanceDescriptor";
@@ -35,6 +36,7 @@ const JOINT_COLOR_TARGET = "#ff3b30";
 
 // Delay before warning that the selected persistent identity is absent.
 const TRACKING_LOST_GRACE_MS = 1500;
+const TRACKED_ROI_PADDING = 0.4;
 
 let landmarkerLoaderPromise = null;
 async function loadPoseLandmarker() {
@@ -57,9 +59,9 @@ async function loadPoseLandmarker() {
       },
       runningMode: "VIDEO",
       numPoses: 5,
-      minPoseDetectionConfidence: 0.3,
-      minPosePresenceConfidence: 0.3,
-      minTrackingConfidence: 0.3,
+      minPoseDetectionConfidence: 0.2,
+      minPosePresenceConfidence: 0.2,
+      minTrackingConfidence: 0.25,
     });
     return landmarker;
   })();
@@ -526,7 +528,9 @@ export default function PoseCanvas({
         enhancedTrackingReadyRef.current &&
         Date.now() - enhancedTracksUpdatedAtRef.current < 1000;
       setPersonCount(
-        enhancedTrackingFresh ? enhancedTracks.length : poses.length
+        enhancedTrackingFresh
+          ? Math.max(enhancedTracks.length, poses.length)
+          : poses.length
       );
       const forcedTrackId = result?.forcedTrackId ?? null;
       const poseTracks = poseTrackerRef.current.update(poses, performance.now(), {
@@ -558,21 +562,44 @@ export default function PoseCanvas({
           selectedEnhancedTrack,
           hipCenter
         );
-        const roi = paddedTrackRoi(selectedEnhancedTrack);
+        const roi = paddedTrackRoi(selectedEnhancedTrack, TRACKED_ROI_PADDING);
         if (roi) targetAnchorRef.current = roi.center;
         if (enhancedPoseIndex >= 0) {
           targetIdx = enhancedPoseIndex;
           lastSeenAtRef.current = Date.now();
-        } else {
-          targetIdx = -1;
         }
-      } else if (
-        enhancedTrackingFresh &&
-        selectedEnhancedTrackIdRef.current != null
-      ) {
-        // The selected tracker ID is occluded/missing. Recording a gap is safer
-        // than capturing the person who crossed through the old box.
-        targetIdx = -1;
+      }
+
+      // Keep the pose identity adaptive as the athlete stands, crouches, turns,
+      // or moves toward the camera. The detector track is the strong identity
+      // signal; appearance and torso scale are supporting signals only.
+      if (targetIdx >= 0 && poses[targetIdx]) {
+        const matchedPose = poses[targetIdx];
+        const currentScale = poseTorsoScale(matchedPose);
+        if (currentScale && (selectedEnhancedTrack || selectedEnhancedTrackIdRef.current == null)) {
+          const previousScale = targetTorsoScaleRef.current;
+          targetTorsoScaleRef.current = previousScale
+            ? previousScale * 0.86 + currentScale * 0.14
+            : currentScale;
+        }
+        const appearance = samplePoseAppearance(matchedPose);
+        const gallery = targetAppearanceGalleryRef.current;
+        const similarity = gallery.length
+          ? bestAppearanceSimilarity(gallery, appearance)
+          : 1;
+        if (
+          appearance &&
+          (!gallery.length || selectedEnhancedTrack || similarity >= 0.56)
+        ) {
+          const blended = gallery.length
+            ? blendAppearance(gallery[0], appearance, 0.12)
+            : appearance;
+          targetAppearanceGalleryRef.current = [
+            blended,
+            ...gallery.slice(1, 5),
+            appearance,
+          ].slice(0, 7);
+        }
       }
 
       // Once an athlete is selected, quality feedback must describe that
@@ -624,7 +651,24 @@ export default function PoseCanvas({
           : PERSON_COLORS[((poseTrack?.id || i + 1) - 1) % PERSON_COLORS.length];
 
         // A visible box makes it unambiguous which athletes are selectable.
-        const box = enhancedTrackingFresh ? null : poseTrack?.box;
+        const poseCenter = hipCenter(lm);
+        const representedByDetector =
+          enhancedTrackingFresh &&
+          poseCenter &&
+          enhancedTracks.some(
+            (track) =>
+              poseCenter.x >= track.x1 &&
+              poseCenter.x <= track.x2 &&
+              poseCenter.y >= track.y1 &&
+              poseCenter.y <= track.y2
+          );
+        const selectedDetectorMissing =
+          enhancedTrackingFresh &&
+          selectedEnhancedTrackIdRef.current != null &&
+          !selectedEnhancedTrack;
+        const box = representedByDetector && !(isTarget && selectedDetectorMissing)
+          ? null
+          : poseTrack?.box;
         if (box) {
           const padX = 0.012;
           const padY = 0.018;
@@ -953,7 +997,9 @@ export default function PoseCanvas({
           }
         }
 
+        if (cancelled) return;
         const video = videoRef.current;
+        if (!video) return;
         if (mode === "live") {
           if (streamRef.current) {
             streamRef.current.getTracks().forEach((t) => t.stop());
@@ -1097,7 +1143,12 @@ export default function PoseCanvas({
               );
               lastPersonTrackTimestampRef.current = trackingTimestamp;
               enhancedClientRef.current
-                .process(v, personDetectorRef.current, trackingTimestamp)
+                .process(
+                  v,
+                  personDetectorRef.current,
+                  trackingTimestamp,
+                  lastPosesRef.current
+                )
                 .then((tracks) => {
                   if (cancelled || !tracks) return;
                   enhancedTrackingFailuresRef.current = 0;
@@ -1108,7 +1159,28 @@ export default function PoseCanvas({
                     : tracks.find(
                         (track) => track.id === selectedEnhancedTrackIdRef.current
                       );
-                  const roi = paddedTrackRoi(selected);
+                  let identityTrack = selected;
+                  if (
+                    !identityTrack &&
+                    targetTrackIdRef.current != null
+                  ) {
+                    const localTarget = poseTrackerRef.current.getTrack(
+                      targetTrackIdRef.current
+                    );
+                    identityTrack = localTarget?.center
+                      ? findTrackAtPoint(tracks, localTarget.center)
+                      : null;
+                    if (identityTrack) {
+                      // A fast sprint can make BoT-SORT issue a new ID even
+                      // though the appearance-verified local pose never left.
+                      // Re-bind only through that exact local pose center.
+                      selectedEnhancedTrackIdRef.current = identityTrack.id;
+                    }
+                  }
+                  const roi = paddedTrackRoi(
+                    identityTrack,
+                    TRACKED_ROI_PADDING
+                  );
                   if (roi) {
                     targetAnchorRef.current = roi.center;
                     targetUsesRoiRef.current = true;
@@ -1134,27 +1206,10 @@ export default function PoseCanvas({
                   : enhancedTracksRef.current.find(
                       (track) => track.id === selectedEnhancedTrackIdRef.current
                     );
-                const enhancedTrackingFresh =
-                  enhancedTrackingReadyRef.current &&
-                  Date.now() - enhancedTracksUpdatedAtRef.current < 1000;
-                if (
-                  enhancedTrackingFresh &&
-                  selectedEnhancedTrackIdRef.current != null &&
-                  !enhancedTarget
-                ) {
-                  // BoT-SORT says the selected identity is currently absent.
-                  // Do not let a crossing player's pose take over the lock.
-                  if (targetTrackIdRef.current != null) {
-                    poseTrackerRef.current.keepTrackAlive(
-                      targetTrackIdRef.current,
-                      performance.now()
-                    );
-                  }
-                  result = { landmarks: [] };
-                } else {
                 // Small athletes get one targeted close-up inference per frame.
-                // This replaces full-frame pose inference after selection, while
-                // ball detection continues to use the complete video frame.
+                // Continue using the last verified local identity if BoT-SORT
+                // briefly misses a fast-moving player. Appearance checks below
+                // prevent a crossing athlete from immediately stealing the lock.
                 const selectedTrack = targetTrackIdRef.current != null
                   ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
                   : null;
@@ -1167,7 +1222,10 @@ export default function PoseCanvas({
                       y: selectedTrack.center.y + selectedTrack.vy * elapsed,
                     }
                   : targetAnchorRef.current;
-                const enhancedRoi = paddedTrackRoi(enhancedTarget);
+                const enhancedRoi = paddedTrackRoi(
+                  enhancedTarget,
+                  TRACKED_ROI_PADDING
+                );
                 const lostForMs = lastSeenAtRef.current == null
                   ? 0
                   : Date.now() - lastSeenAtRef.current;
@@ -1188,35 +1246,57 @@ export default function PoseCanvas({
                   };
                   searchWidth = 0.38;
                 }
-                const targetedPoses = detectPosesNearPoint(searchCenter, {
+                let targetedPoses = detectPosesNearPoint(searchCenter, {
                   cropWidth: searchWidth,
                   cropHeight: searchHeight,
                 });
+                if (lostForMs > 220) {
+                  // Narrow ROI inference is best while the target is visible,
+                  // but it cannot recover from a sudden sprint outside the old
+                  // crop. During a loss, scan the full frame and let appearance,
+                  // scale, and predicted position select the original athlete.
+                  const recovery = lm.detectForVideo(v, nextPoseTimestamp());
+                  targetedPoses = [
+                    ...targetedPoses,
+                    ...(recovery?.landmarks || []),
+                  ];
+                }
                 let closestTarget = null;
                 let closestAppearance = null;
                 let closestSimilarity = 0;
                 let bestTargetScore = -Infinity;
                 for (const pose of targetedPoses) {
                   const d = dist2D(hipCenter(pose), identityCenter);
-                  if (d > (lostForMs > 300 ? 0.42 : 0.18)) continue;
+                  const maximumDistance = enhancedRoi
+                    ? Math.max(0.24, Math.min(0.48, enhancedRoi.height * 0.58))
+                    : lostForMs > 300 ? 0.42 : 0.2;
+                  if (d > maximumDistance) continue;
                   const candidateTorsoScale = poseTorsoScale(pose);
                   const lockedTorsoScale = targetTorsoScaleRef.current;
                   const torsoRatio = lockedTorsoScale && candidateTorsoScale
                     ? candidateTorsoScale / lockedTorsoScale
                     : 1;
+                  const maximumScaleChange = enhancedRoi ? 1.05 : 0.58;
                   if (
                     lockedTorsoScale && candidateTorsoScale &&
-                    Math.abs(Math.log(torsoRatio)) > 0.45
+                    Math.abs(Math.log(torsoRatio)) > maximumScaleChange
                   ) continue;
                   const appearance = samplePoseAppearance(pose);
                   const gallery = targetAppearanceGalleryRef.current;
-                  const similarity = gallery.length
+                  const insideDetectorCandidate = enhancedTarget &&
+                    poseIndexInsideTrack([pose], enhancedTarget, hipCenter) === 0;
+                  const similarity = gallery.length && appearance
                     ? bestAppearanceSimilarity(gallery, appearance)
-                    : 1;
+                    : insideDetectorCandidate ? 0.6 : 1;
                   // If somebody crosses in front, reject their pose instead of
                   // allowing it to steal the selected identity. Missing frames
                   // are safer than analyzing the wrong athlete.
-                  if (gallery.length && similarity < 0.52) continue;
+                  const minimumSimilarity = enhancedRoi ? 0.24 : 0.52;
+                  if (
+                    gallery.length &&
+                    !insideDetectorCandidate &&
+                    (!appearance || similarity < minimumSimilarity)
+                  ) continue;
                   const score = similarity * 2.2 - d * 2.4;
                   if (score > bestTargetScore) {
                     bestTargetScore = score;
@@ -1229,9 +1309,16 @@ export default function PoseCanvas({
                   const center = hipCenter(closestTarget);
                   const recentlyVisible = lastSeenAtRef.current != null &&
                     Date.now() - lastSeenAtRef.current < 220;
-                  const continuousMatch = recentlyVisible &&
-                    dist2D(center, identityCenter) < 0.12 &&
-                    closestSimilarity >= 0.56;
+                  const insideSelectedDetector = enhancedTarget &&
+                    poseIndexInsideTrack(
+                      [closestTarget],
+                      enhancedTarget,
+                      hipCenter
+                    ) === 0;
+                  const continuousMatch = insideSelectedDetector ||
+                    (recentlyVisible &&
+                      dist2D(center, identityCenter) < 0.12 &&
+                      closestSimilarity >= 0.56);
                   if (!continuousMatch) {
                     const pending = targetReacquireRef.current;
                     const sameCandidate = pending &&
@@ -1264,7 +1351,6 @@ export default function PoseCanvas({
                       forcedTrackId: targetTrackIdRef.current,
                     }
                   : { landmarks: [] };
-                }
               } else if (zoom > 1.001) {
                 // Crop the visible zoom window into an offscreen canvas
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
@@ -1645,8 +1731,25 @@ export default function PoseCanvas({
     const v = videoRef.current;
     if (!v) return;
     try {
-      if (v.paused) await v.play();
-      else v.pause();
+      if (v.paused) {
+        const restartingEndedClip =
+          v.ended ||
+          (Number.isFinite(v.duration) && v.currentTime >= v.duration - 0.05);
+        if (restartingEndedClip) {
+          // A tracker cannot carry motion state backward from the final frame
+          // to frame zero. Start a clean pass and require a fresh, honest lock.
+          clearTarget();
+          poseTrackerRef.current.reset();
+          lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
+          lastPosesRef.current = [];
+          enhancedTracksRef.current = [];
+          enhancedTracksUpdatedAtRef.current = 0;
+          if (enhancedClientRef.current) {
+            await enhancedClientRef.current.restart();
+          }
+        }
+        await v.play();
+      } else v.pause();
     } catch {
       /* play promise rejected (autoplay policy) — user can tap again */
     }
@@ -2011,7 +2114,10 @@ export default function PoseCanvas({
       Date.now() - enhancedTracksUpdatedAtRef.current < 1000
       ? findTrackAtPoint(enhancedTracksRef.current, click)
       : null;
-    const enhancedRoi = paddedTrackRoi(enhancedSelection);
+    const enhancedRoi = paddedTrackRoi(
+      enhancedSelection,
+      TRACKED_ROI_PADDING
+    );
     const directIndex = enhancedSelection
       ? poseIndexInsideTrack(lastPosesRef.current, enhancedSelection, hipCenter)
       : findPoseAtPoint(click);
@@ -2134,9 +2240,14 @@ export default function PoseCanvas({
 
     const locked = await findAndLockPoseAtPoint(click);
     if (!locked) {
-      setError(
-        "No athlete detected at that spot. Pause on a clear full-body frame, then tap the athlete again."
-      );
+      // A missed selection is recoverable. Keep the video controls and canvas
+      // interactive so the user can advance a frame and try the same athlete
+      // again instead of covering the whole player with a fatal-error overlay.
+      setError(null);
+      setFrameQuality({
+        level: "poor",
+        issues: ["No pose at that spot — advance a frame and tap again"],
+      });
     }
   };
 

@@ -1,8 +1,10 @@
 import {
   EnhancedTrackingClient,
   findTrackAtPoint,
+  mergePersonDetections,
   normalizeTrackedBoxes,
   paddedTrackRoi,
+  poseDetectionsFromLandmarks,
   poseIndexInsideTrack,
 } from "./enhancedTracking";
 
@@ -64,6 +66,35 @@ describe("enhanced athlete tracking helpers", () => {
     );
     expect(tracks).toEqual([
       { id: 7, confidence: 0.8, x1: 0.1, y1: 0.1, x2: 0.3, y2: 0.9 },
+    ]);
+  });
+
+  test("turns visible pose landmarks into a high-confidence person box", () => {
+    const pose = Array.from({ length: 33 }, () => null);
+    [11, 12, 23, 24, 25, 26].forEach((index, offset) => {
+      pose[index] = {
+        x: 0.4 + (offset % 2) * 0.1,
+        y: 0.2 + Math.floor(offset / 2) * 0.25,
+        visibility: 0.9,
+      };
+    });
+
+    const detections = poseDetectionsFromLandmarks([pose], 640, 360);
+
+    expect(detections).toHaveLength(1);
+    expect(detections[0].confidence).toBeCloseTo(0.9);
+    expect(detections[0].xyxy[0]).toBeLessThan(0.4 * 640);
+    expect(detections[0].xyxy[2]).toBeGreaterThan(0.5 * 640);
+  });
+
+  test("prefers a pose-backed box over an overlapping detector box", () => {
+    const poseBox = { xyxy: [100, 40, 220, 300], confidence: 0.9 };
+    const duplicate = { xyxy: [105, 45, 215, 295], confidence: 0.5 };
+    const otherPlayer = { xyxy: [400, 40, 520, 300], confidence: 0.8 };
+
+    expect(mergePersonDetections([duplicate, otherPlayer], [poseBox])).toEqual([
+      poseBox,
+      otherPlayer,
     ]);
   });
 

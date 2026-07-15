@@ -28,6 +28,25 @@ class TrackingSessionNotFoundError(KeyError):
     """Raised when a session is missing, expired, or owned by another user."""
 
 
+BOT_SORT_OPTIONS = {
+    "lost_track_buffer": 120,
+    "frame_rate": 7.0,
+    "track_activation_threshold": 0.35,
+    "minimum_consecutive_frames": 1,
+    "minimum_iou_threshold_first_assoc": 0.08,
+    "minimum_iou_threshold_second_assoc": 0.12,
+    "minimum_iou_threshold_unconfirmed_assoc": 0.12,
+    "high_conf_det_threshold": 0.45,
+    "enable_cmc": True,
+}
+
+
+def create_botsort_tracker(tracker_class: type[Any]) -> Any:
+    """Create a tracker tuned to the browser detector's real cadence."""
+
+    return tracker_class(**BOT_SORT_OPTIONS)
+
+
 @dataclass
 class _Session:
     user_id: str
@@ -94,7 +113,11 @@ class TrackingSessionManager:
             import supervision as sv  # type: ignore
             from trackers import BoTSORTTracker  # type: ignore
 
-            self._tracker_factory = lambda: BoTSORTTracker()
+            # Browser person detections arrive at roughly 7 FPS and basketball
+            # players can cross a large part of their previous box between
+            # updates. BoT-SORT's 30 FPS defaults were too strict here, causing
+            # a moving athlete to receive a new ID almost immediately.
+            self._tracker_factory = lambda: create_botsort_tracker(BoTSORTTracker)
 
             def build_detections(boxes: list[list[float]], confidence: list[float]) -> Any:
                 xyxy = np.asarray(boxes, dtype=np.float32).reshape((-1, 4))
