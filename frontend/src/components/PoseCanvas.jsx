@@ -552,7 +552,13 @@ export default function PoseCanvas({
         const localSimilarity = gallery.length && localAppearance
           ? bestAppearanceSimilarity(gallery, localAppearance)
           : 1;
-        if (!gallery.length || localSimilarity >= 0.5) {
+        const localDistance = targetAnchorRef.current
+          ? dist2D(targetTrack.center, targetAnchorRef.current)
+          : 0;
+        const continuousLocalMotion = lastSeenAtRef.current != null &&
+          Date.now() - lastSeenAtRef.current < 400 &&
+          localDistance < Math.max(0.14, (targetTrack.box?.height || 0) * 0.55);
+        if (continuousLocalMotion || !gallery.length || localSimilarity >= 0.5) {
           targetIdx = targetTrack.poseIndex;
           targetAnchorRef.current = targetTrack.center;
           syncTargetVisualAnchor(targetTrack.landmarks);
@@ -578,11 +584,21 @@ export default function PoseCanvas({
           const similarity = gallery.length && candidateAppearance
             ? bestAppearanceSimilarity(gallery, candidateAppearance)
             : 1;
-          // BoT-SORT IDs can move to a different player after a crossing or
-          // edit cut. Never let the numeric ID override a failed appearance
-          // check and transfer motion capture to that athlete.
-          if (!gallery.length || similarity >= 0.5) {
+          const candidateCenter = hipCenter(poses[enhancedPoseIndex]);
+          const detectorDistance = candidateCenter && targetAnchorRef.current
+            ? dist2D(candidateCenter, targetAnchorRef.current)
+            : 0;
+          const agreesWithLocalPose = targetIdx === -1 || enhancedPoseIndex === targetIdx;
+          const continuousDetectorMotion = agreesWithLocalPose &&
+            lastSeenAtRef.current != null &&
+            Date.now() - lastSeenAtRef.current < 400 &&
+            detectorDistance < 0.18;
+          // Smooth frame-to-frame motion remains authoritative even when a ball
+          // or raised arms temporarily cover the jersey. Crossings and edit
+          // cuts exceed this continuity gate and still require appearance.
+          if (continuousDetectorMotion || !gallery.length || similarity >= 0.5) {
             targetIdx = enhancedPoseIndex;
+            if (candidateCenter) targetAnchorRef.current = candidateCenter;
             lastSeenAtRef.current = Date.now();
           }
         }
@@ -1407,12 +1423,18 @@ export default function PoseCanvas({
                   const similarity = gallery.length && appearance
                     ? bestAppearanceSimilarity(gallery, appearance)
                     : insideDetectorCandidate ? 0.6 : 1;
+                  const spatiallyContinuous = Boolean(
+                    insideDetectorCandidate &&
+                    lostForMs < 400 &&
+                    d < 0.18
+                  );
                   // If somebody crosses in front, reject their pose instead of
                   // allowing it to steal the selected identity. Missing frames
                   // are safer than analyzing the wrong athlete.
                   const minimumSimilarity = enhancedRoi ? 0.44 : 0.52;
                   if (
                     gallery.length &&
+                    !spatiallyContinuous &&
                     (!appearance || similarity < minimumSimilarity)
                   ) continue;
                   const score = similarity * 2.2 - d * 2.4;
@@ -1434,7 +1456,9 @@ export default function PoseCanvas({
                       hipCenter
                     ) === 0;
                   const continuousMatch =
-                    (insideSelectedDetector && closestSimilarity >= 0.44) ||
+                    (insideSelectedDetector &&
+                      (closestSimilarity >= 0.44 ||
+                        (recentlyVisible && dist2D(center, identityCenter) < 0.18))) ||
                     (recentlyVisible &&
                       dist2D(center, identityCenter) < 0.12 &&
                       closestSimilarity >= 0.56);
