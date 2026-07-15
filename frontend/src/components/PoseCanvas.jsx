@@ -2,6 +2,16 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
 import { assessFrameQuality } from "../lib/frameQuality";
 import { PoseIdentityTracker } from "../lib/poseIdentityTracker";
+import {
+  appearanceSimilarity,
+  blendAppearance,
+  createSpatialColorHistogram,
+} from "../lib/appearanceDescriptor";
+import {
+  findTemplate,
+  grayscaleFromRgba,
+  prepareTemplate,
+} from "../lib/templateTracker";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
@@ -149,6 +159,8 @@ export default function PoseCanvas({
   const lastPoseTracksRef = useRef({ byPoseIndex: new Map(), tracks: [] });
   const targetTrackIdRef = useRef(null); // persistent identity selected by the user
   const targetUsesRoiRef = useRef(false); // close-up inference for small/far athletes
+  const targetAppearanceRef = useRef(null);
+  const appearanceCanvasRef = useRef(null);
   const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
   const [hasTarget, setHasTarget] = useState(false);
@@ -188,6 +200,8 @@ export default function PoseCanvas({
   const ballAreaSamplesRef = useRef([]); // sqrt(width*height)/diag samples while target is locked
   const preferredBallSizeRef = useRef(null); // {size, conf, savedAt} loaded from localStorage
   const hoopRoiRef = useRef(null); // mirror of hoopRoi state for rAF reads
+  const hoopTemplateRef = useRef(null);
+  const hoopTrackingCanvasRef = useRef(null);
   const [ballDetectorState, setBallDetectorState] = useState("idle"); // 'idle' | 'loading' | 'ready' | 'failed'
   const [ballSeen, setBallSeen] = useState(false);
   const [hasLockedBall, setHasLockedBall] = useState(false);
@@ -269,6 +283,83 @@ export default function PoseCanvas({
     ballAllHistoryRef.current = [];
     setHasLockedBall(false);
   };
+
+  function captureHoopTemplate(roi) {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video?.videoHeight || !roi) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = 36;
+    canvas.height = 24;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(
+      video,
+      roi.x * video.videoWidth,
+      roi.y * video.videoHeight,
+      roi.w * video.videoWidth,
+      roi.h * video.videoHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+    hoopTemplateRef.current = prepareTemplate(
+      grayscaleFromRgba(rgba),
+      canvas.width,
+      canvas.height
+    );
+  }
+
+  function trackHoopRoi() {
+    const video = videoRef.current;
+    const roi = hoopRoiRef.current;
+    const template = hoopTemplateRef.current;
+    if (!video?.videoWidth || !video?.videoHeight || !roi || !template) return;
+    const marginX = 0.045;
+    const marginY = 0.035;
+    const searchX = Math.max(0, roi.x - marginX);
+    const searchY = Math.max(0, roi.y - marginY);
+    const searchRight = Math.min(1, roi.x + roi.w + marginX);
+    const searchBottom = Math.min(1, roi.y + roi.h + marginY);
+    const searchWidthNorm = searchRight - searchX;
+    const searchHeightNorm = searchBottom - searchY;
+    if (!hoopTrackingCanvasRef.current) {
+      hoopTrackingCanvasRef.current = document.createElement("canvas");
+    }
+    const canvas = hoopTrackingCanvasRef.current;
+    canvas.width = Math.max(
+      template.width,
+      Math.round(template.width * searchWidthNorm / roi.w)
+    );
+    canvas.height = Math.max(
+      template.height,
+      Math.round(template.height * searchHeightNorm / roi.h)
+    );
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(
+      video,
+      searchX * video.videoWidth,
+      searchY * video.videoHeight,
+      searchWidthNorm * video.videoWidth,
+      searchHeightNorm * video.videoHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    const search = grayscaleFromRgba(
+      ctx.getImageData(0, 0, canvas.width, canvas.height).data
+    );
+    const match = findTemplate(search, canvas.width, canvas.height, template);
+    if (match.score < 0.52) return;
+    const nextX = searchX + match.x / canvas.width * searchWidthNorm;
+    const nextY = searchY + match.y / canvas.height * searchHeightNorm;
+    if (Math.hypot(nextX - roi.x, nextY - roi.y) > 0.04) return;
+    if (Math.hypot(nextX - roi.x, nextY - roi.y) < 0.0008) return;
+    const next = { ...roi, x: nextX, y: nextY };
+    hoopRoiRef.current = next;
+    setHoopRoi(next);
+  }
 
   // Live shot state machine: mirrors shotDetection.js logic for real-time UX
   function evaluateLiveShot(t, ball) {
@@ -643,6 +734,7 @@ export default function PoseCanvas({
     lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
+    targetAppearanceRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
@@ -655,6 +747,8 @@ export default function PoseCanvas({
     ballPredictRef.current = null;
     trackQualityRef.current = "lost";
     ballAreaSamplesRef.current = [];
+    hoopTemplateRef.current = null;
+    hoopRoiRef.current = null;
     liveShotStateRef.current = {
       inAttempt: false,
       apex: null,
@@ -833,21 +927,58 @@ export default function PoseCanvas({
                 // This replaces full-frame pose inference after selection, while
                 // ball detection continues to use the complete video frame.
                 const targetedPoses = detectPosesNearPoint(targetAnchorRef.current);
+                const selectedTrack = targetTrackIdRef.current != null
+                  ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
+                  : null;
+                const elapsed = selectedTrack
+                  ? Math.min(0.25, Math.max(0, performance.now() - selectedTrack.updatedAt) / 1000)
+                  : 0;
+                const predictedCenter = selectedTrack
+                  ? {
+                      x: selectedTrack.center.x + selectedTrack.vx * elapsed,
+                      y: selectedTrack.center.y + selectedTrack.vy * elapsed,
+                    }
+                  : targetAnchorRef.current;
                 let closestTarget = null;
-                let closestDistance = Infinity;
+                let closestAppearance = null;
+                let bestTargetScore = -Infinity;
                 for (const pose of targetedPoses) {
-                  const d = dist2D(hipCenter(pose), targetAnchorRef.current);
-                  if (d < closestDistance) {
-                    closestDistance = d;
+                  const d = dist2D(hipCenter(pose), predictedCenter);
+                  if (d > 0.28) continue;
+                  const appearance = samplePoseAppearance(pose);
+                  const similarity = targetAppearanceRef.current
+                    ? appearanceSimilarity(targetAppearanceRef.current, appearance)
+                    : 1;
+                  // If somebody crosses in front, reject their pose instead of
+                  // allowing it to steal the selected identity. Missing frames
+                  // are safer than analyzing the wrong athlete.
+                  if (targetAppearanceRef.current && similarity < 0.55) continue;
+                  const score = similarity * 1.4 - d * 2.2;
+                  if (score > bestTargetScore) {
+                    bestTargetScore = score;
                     closestTarget = pose;
+                    closestAppearance = appearance;
                   }
+                }
+                if (closestTarget && closestAppearance) {
+                  targetAppearanceRef.current = blendAppearance(
+                    targetAppearanceRef.current,
+                    closestAppearance
+                  );
+                } else if (targetTrackIdRef.current != null) {
+                  // Retain the selected identity through long occlusions while
+                  // lastSeenAtRef still drives the visible "tracking lost" UI.
+                  poseTrackerRef.current.touchTrack(
+                    targetTrackIdRef.current,
+                    performance.now()
+                  );
                 }
                 result = closestTarget
                   ? {
                       landmarks: [closestTarget],
                       forcedTrackId: targetTrackIdRef.current,
                     }
-                  : lm.detectForVideo(v, nextPoseTimestamp());
+                  : { landmarks: [] };
               } else if (zoom > 1.001) {
                 // Crop the visible zoom window into an offscreen canvas
                 if (!cropCanvasRef.current) cropCanvasRef.current = document.createElement("canvas");
@@ -921,6 +1052,9 @@ export default function PoseCanvas({
               if (sport === "basketball" && ballDet && runBallThisTick) {
                 {
                   try {
+                    if (hoopRoiRef.current && hoopTemplateRef.current) {
+                      trackHoopRoi();
+                    }
                     const detRes = ballDet.detectForVideo(v, performance.now());
                     const dets = detRes?.detections || [];
                     // Collect ALL detected sports balls so the user can pick
@@ -1121,7 +1255,14 @@ export default function PoseCanvas({
                     if (runningRef.current && startedAtRef.current != null) {
                       const t = (Date.now() - startedAtRef.current) / 1000;
                       const recordBall = ball && !ball.extrapolated ? ball : null;
-                      ballFramesRef.current.push(recordBall ? { t, ...recordBall } : { t, x: null, y: null, conf: 0 });
+                      const hoopSnapshot = hoopRoiRef.current
+                        ? { ...hoopRoiRef.current }
+                        : null;
+                      ballFramesRef.current.push(
+                        recordBall
+                          ? { t, ...recordBall, hoop: hoopSnapshot }
+                          : { t, x: null, y: null, conf: 0, hoop: hoopSnapshot }
+                      );
                       // Live make/miss detection while recording (real ball only)
                       if (recordBall && hoopRoiRef.current) {
                         evaluateLiveShot(t, recordBall);
@@ -1317,6 +1458,44 @@ export default function PoseCanvas({
     return nearestIndex;
   }
 
+  function samplePoseAppearance(pose) {
+    const video = videoRef.current;
+    if (!video?.videoWidth || !video?.videoHeight || !pose) return null;
+    const points = [11, 12, 23, 24, 25, 26]
+      .map((index) => pose[index])
+      .filter((point) => point && (point.visibility == null || point.visibility > 0.25));
+    if (points.length < 4) return null;
+    const xs = points.map((point) => point.x);
+    const shoulderY = Math.min(pose[11]?.y ?? 1, pose[12]?.y ?? 1);
+    const kneeY = Math.max(pose[25]?.y ?? 0, pose[26]?.y ?? 0);
+    const bodyWidth = Math.max(0.04, Math.max(...xs) - Math.min(...xs));
+    const x = Math.max(0, Math.min(1, Math.min(...xs) - bodyWidth * 0.2));
+    const y = Math.max(0, Math.min(1, shoulderY));
+    const width = Math.min(1 - x, bodyWidth * 1.4);
+    const height = Math.min(1 - y, Math.max(0.08, kneeY - shoulderY));
+    if (width <= 0 || height <= 0) return null;
+    if (!appearanceCanvasRef.current) {
+      appearanceCanvasRef.current = document.createElement("canvas");
+    }
+    const canvas = appearanceCanvasRef.current;
+    canvas.width = 24;
+    canvas.height = 32;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    ctx.drawImage(
+      video,
+      x * video.videoWidth,
+      y * video.videoHeight,
+      width * video.videoWidth,
+      height * video.videoHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+    const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    return createSpatialColorHistogram(image.data, canvas.width, canvas.height);
+  }
+
   function lockPose(poseIndex, { forceRoi = false } = {}) {
     const pose = lastPosesRef.current[poseIndex];
     const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(poseIndex);
@@ -1325,6 +1504,7 @@ export default function PoseCanvas({
     targetTrackIdRef.current = poseTrack.id;
     poseTrackerRef.current.touchTrack(poseTrack.id, performance.now());
     targetAnchorRef.current = center;
+    targetAppearanceRef.current = samplePoseAppearance(pose);
     targetUsesRoiRef.current = forceRoi || (poseTrack.box?.height || 1) < 0.35;
     lastSeenAtRef.current = Date.now();
     setHasTarget(true);
@@ -1425,12 +1605,15 @@ export default function PoseCanvas({
     if (placementStep === "hoop") {
       const w = 0.12;
       const h = 0.08;
-      setHoopRoi({
+      const placedHoop = {
         x: Math.max(0, Math.min(1 - w, click.x - w / 2)),
         y: Math.max(0, Math.min(1 - h, click.y - h / 2)),
         w,
         h,
-      });
+      };
+      hoopRoiRef.current = placedHoop;
+      setHoopRoi(placedHoop);
+      captureHoopTemplate(placedHoop);
       setPlacementStep("ready");
       return;
     }
@@ -1480,16 +1663,21 @@ export default function PoseCanvas({
     if (running) return;
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
+    targetAppearanceRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     setHasTarget(false);
     setTrackingLost(false);
     setPlacementStep("athlete");
+    hoopTemplateRef.current = null;
+    hoopRoiRef.current = null;
     setHoopRoi(null);
   };
 
   const clearHoop = () => {
     if (running) return;
+    hoopTemplateRef.current = null;
+    hoopRoiRef.current = null;
     setHoopRoi(null);
     setPlacementStep("hoop");
   };

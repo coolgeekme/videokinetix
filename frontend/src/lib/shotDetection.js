@@ -45,12 +45,6 @@ export function detectShots(ballFrames, hoopRoi) {
   if (!hoopRoi || !ballFrames || ballFrames.length < 5) {
     return { shots: [], makes: 0, attempts: 0, fg_pct: null, hoop_placed: !!hoopRoi };
   }
-  const hoopTop = hoopRoi.y;
-  const hoopBottom = hoopRoi.y + hoopRoi.h;
-  const hoopLeft = hoopRoi.x;
-  const hoopRight = hoopRoi.x + hoopRoi.w;
-  const hoopCenterX = hoopRoi.x + hoopRoi.w / 2;
-
   const shots = [];
   let i = 0;
   let lastShotEndT = -Infinity;
@@ -98,8 +92,9 @@ export function detectShots(ballFrames, hoopRoi) {
       j++;
     }
     // Validate this is a real shot attempt — apex must be above hoop by margin
-    const heightAboveHoop = hoopTop - apex.y; // positive = apex is above hoop top
-    if (heightAboveHoop < hoopRoi.h * MIN_ATTEMPT_HEIGHT_REL_HOOP) {
+    const apexHoop = apex.hoop || hoopRoi;
+    const heightAboveHoop = apexHoop.y - apex.y; // positive = apex is above hoop top
+    if (heightAboveHoop < apexHoop.h * MIN_ATTEMPT_HEIGHT_REL_HOOP) {
       i = j + 1;
       continue;
     }
@@ -119,10 +114,16 @@ export function detectShots(ballFrames, hoopRoi) {
       }
       if (f.t - apex.t > OUTCOME_WINDOW_S) break;
       ball_path.push(f);
+      const currentHoop = f.hoop || hoopRoi;
+      const previousHoop = lastF?.hoop || currentHoop;
+      const hoopTop = currentHoop.y;
+      const hoopBottom = currentHoop.y + currentHoop.h;
+      const hoopLeft = currentHoop.x;
+      const hoopRight = currentHoop.x + currentHoop.w;
       // Detect crossing of hoopTop (going down)
       if (
         lastF &&
-        lastF.y <= hoopTop &&
+        lastF.y <= previousHoop.y &&
         f.y > hoopTop &&
         f.x >= hoopLeft &&
         f.x <= hoopRight
@@ -133,7 +134,7 @@ export function detectShots(ballFrames, hoopRoi) {
       if (
         crossedTop &&
         lastF &&
-        lastF.y <= hoopBottom &&
+        lastF.y <= previousHoop.y + previousHoop.h &&
         f.y > hoopBottom &&
         f.x >= hoopLeft &&
         f.x <= hoopRight
@@ -155,7 +156,7 @@ export function detectShots(ballFrames, hoopRoi) {
       t_outcome: outcomeT,
       apex_x: +apex.x.toFixed(4),
       apex_y: +apex.y.toFixed(4),
-      hoop_x: +hoopCenterX.toFixed(4),
+      hoop_x: +(apexHoop.x + apexHoop.w / 2).toFixed(4),
       made,
       // Down-sample ball_path to at most 6 evenly-spaced points so the payload
       // stays tiny — visualization isn't replayed, this is only for analytics.
