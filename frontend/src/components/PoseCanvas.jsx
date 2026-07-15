@@ -3,9 +3,8 @@ import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, 
 import { assessFrameQuality } from "../lib/frameQuality";
 import { PoseIdentityTracker } from "../lib/poseIdentityTracker";
 import {
-  appearanceSimilarity,
-  blendAppearance,
-  createSpatialColorHistogram,
+  bestAppearanceSimilarity,
+  createRegionalColorHistogram,
 } from "../lib/appearanceDescriptor";
 import {
   findTemplate,
@@ -159,7 +158,10 @@ export default function PoseCanvas({
   const lastPoseTracksRef = useRef({ byPoseIndex: new Map(), tracks: [] });
   const targetTrackIdRef = useRef(null); // persistent identity selected by the user
   const targetUsesRoiRef = useRef(false); // close-up inference for small/far athletes
-  const targetAppearanceRef = useRef(null);
+  const targetAppearanceGalleryRef = useRef([]);
+  const targetReacquireRef = useRef(null);
+  const targetTorsoScaleRef = useRef(null);
+  const targetSearchPhaseRef = useRef(0);
   const appearanceCanvasRef = useRef(null);
   const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
@@ -734,7 +736,10 @@ export default function PoseCanvas({
     lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
-    targetAppearanceRef.current = null;
+    targetAppearanceGalleryRef.current = [];
+    targetReacquireRef.current = null;
+    targetTorsoScaleRef.current = null;
+    targetSearchPhaseRef.current = 0;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
@@ -926,12 +931,11 @@ export default function PoseCanvas({
                 // Small athletes get one targeted close-up inference per frame.
                 // This replaces full-frame pose inference after selection, while
                 // ball detection continues to use the complete video frame.
-                const targetedPoses = detectPosesNearPoint(targetAnchorRef.current);
                 const selectedTrack = targetTrackIdRef.current != null
                   ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
                   : null;
                 const elapsed = selectedTrack
-                  ? Math.min(0.25, Math.max(0, performance.now() - selectedTrack.updatedAt) / 1000)
+                  ? Math.min(1.2, Math.max(0, performance.now() - selectedTrack.updatedAt) / 1000)
                   : 0;
                 const predictedCenter = selectedTrack
                   ? {
@@ -939,36 +943,89 @@ export default function PoseCanvas({
                       y: selectedTrack.center.y + selectedTrack.vy * elapsed,
                     }
                   : targetAnchorRef.current;
+                const lostForMs = lastSeenAtRef.current == null
+                  ? 0
+                  : Date.now() - lastSeenAtRef.current;
+                let searchCenter = predictedCenter;
+                let searchWidth = 0.38;
+                if (lostForMs > 300) {
+                  // Sweep narrow, person-sized crops instead of widening one
+                  // crop that would make MediaPipe favor the largest player.
+                  const offsets = [-0.3, 0, 0.3];
+                  const phase = targetSearchPhaseRef.current % offsets.length;
+                  targetSearchPhaseRef.current += 1;
+                  searchCenter = {
+                    x: Math.max(0, Math.min(1, targetAnchorRef.current.x + offsets[phase])),
+                    y: predictedCenter.y,
+                  };
+                  searchWidth = 0.38;
+                }
+                const targetedPoses = detectPosesNearPoint(searchCenter, {
+                  cropWidth: searchWidth,
+                  cropHeight: 0.72,
+                });
                 let closestTarget = null;
                 let closestAppearance = null;
+                let closestSimilarity = 0;
                 let bestTargetScore = -Infinity;
                 for (const pose of targetedPoses) {
                   const d = dist2D(hipCenter(pose), predictedCenter);
-                  if (d > 0.28) continue;
+                  if (d > (lostForMs > 300 ? 0.42 : 0.18)) continue;
+                  const candidateTorsoScale = poseTorsoScale(pose);
+                  const lockedTorsoScale = targetTorsoScaleRef.current;
+                  const torsoRatio = lockedTorsoScale && candidateTorsoScale
+                    ? candidateTorsoScale / lockedTorsoScale
+                    : 1;
+                  if (
+                    lockedTorsoScale && candidateTorsoScale &&
+                    Math.abs(Math.log(torsoRatio)) > 0.45
+                  ) continue;
                   const appearance = samplePoseAppearance(pose);
-                  const similarity = targetAppearanceRef.current
-                    ? appearanceSimilarity(targetAppearanceRef.current, appearance)
+                  const gallery = targetAppearanceGalleryRef.current;
+                  const similarity = gallery.length
+                    ? bestAppearanceSimilarity(gallery, appearance)
                     : 1;
                   // If somebody crosses in front, reject their pose instead of
                   // allowing it to steal the selected identity. Missing frames
                   // are safer than analyzing the wrong athlete.
-                  if (targetAppearanceRef.current && similarity < 0.55) continue;
-                  const score = similarity * 1.4 - d * 2.2;
+                  if (gallery.length && similarity < 0.52) continue;
+                  const score = similarity * 2.2 - d * 2.4;
                   if (score > bestTargetScore) {
                     bestTargetScore = score;
                     closestTarget = pose;
                     closestAppearance = appearance;
+                    closestSimilarity = similarity;
                   }
                 }
                 if (closestTarget && closestAppearance) {
-                  targetAppearanceRef.current = blendAppearance(
-                    targetAppearanceRef.current,
-                    closestAppearance
-                  );
-                } else if (targetTrackIdRef.current != null) {
+                  const center = hipCenter(closestTarget);
+                  const recentlyVisible = lastSeenAtRef.current != null &&
+                    Date.now() - lastSeenAtRef.current < 220;
+                  const continuousMatch = recentlyVisible &&
+                    dist2D(center, predictedCenter) < 0.12 &&
+                    closestSimilarity >= 0.56;
+                  if (!continuousMatch) {
+                    const pending = targetReacquireRef.current;
+                    const sameCandidate = pending &&
+                      dist2D(pending.center, center) < 0.22 &&
+                      Date.now() - pending.at < 900;
+                    targetReacquireRef.current = {
+                      center,
+                      frames: sameCandidate ? pending.frames + 1 : 1,
+                      at: Date.now(),
+                    };
+                    if (targetReacquireRef.current.frames < 2) {
+                      closestTarget = null;
+                    }
+                  }
+                  if (closestTarget) {
+                    targetReacquireRef.current = null;
+                  }
+                }
+                if (!closestTarget && targetTrackIdRef.current != null) {
                   // Retain the selected identity through long occlusions while
                   // lastSeenAtRef still drives the visible "tracking lost" UI.
-                  poseTrackerRef.current.touchTrack(
+                  poseTrackerRef.current.keepTrackAlive(
                     targetTrackIdRef.current,
                     performance.now()
                   );
@@ -1466,20 +1523,20 @@ export default function PoseCanvas({
       .filter((point) => point && (point.visibility == null || point.visibility > 0.25));
     if (points.length < 4) return null;
     const xs = points.map((point) => point.x);
-    const shoulderY = Math.min(pose[11]?.y ?? 1, pose[12]?.y ?? 1);
-    const kneeY = Math.max(pose[25]?.y ?? 0, pose[26]?.y ?? 0);
-    const bodyWidth = Math.max(0.04, Math.max(...xs) - Math.min(...xs));
-    const x = Math.max(0, Math.min(1, Math.min(...xs) - bodyWidth * 0.2));
-    const y = Math.max(0, Math.min(1, shoulderY));
-    const width = Math.min(1 - x, bodyWidth * 1.4);
-    const height = Math.min(1 - y, Math.max(0.08, kneeY - shoulderY));
+    const ys = points.map((point) => point.y);
+    const bodyWidth = Math.max(0.035, Math.max(...xs) - Math.min(...xs));
+    const bodyHeight = Math.max(0.07, Math.max(...ys) - Math.min(...ys));
+    const x = Math.max(0, Math.min(1, Math.min(...xs) - bodyWidth * 0.18));
+    const y = Math.max(0, Math.min(1, Math.min(...ys) - bodyHeight * 0.08));
+    const width = Math.min(1 - x, bodyWidth * 1.36);
+    const height = Math.min(1 - y, bodyHeight * 1.16);
     if (width <= 0 || height <= 0) return null;
     if (!appearanceCanvasRef.current) {
       appearanceCanvasRef.current = document.createElement("canvas");
     }
     const canvas = appearanceCanvasRef.current;
-    canvas.width = 24;
-    canvas.height = 32;
+    canvas.width = 64;
+    canvas.height = 96;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     ctx.drawImage(
       video,
@@ -1493,7 +1550,63 @@ export default function PoseCanvas({
       canvas.height
     );
     const image = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    return createSpatialColorHistogram(image.data, canvas.width, canvas.height);
+    const localPoint = (point) => ({
+      x: (point.x - x) / width * canvas.width,
+      y: (point.y - y) / height * canvas.height,
+    });
+    const shoulderL = localPoint(pose[11]);
+    const shoulderR = localPoint(pose[12]);
+    const hipL = localPoint(pose[23]);
+    const hipR = localPoint(pose[24]);
+    const kneeL = localPoint(pose[25]);
+    const kneeR = localPoint(pose[26]);
+    const torso = [];
+    const lower = [];
+    const samplePatch = (target, px, py, radius = 1) => {
+      const cx = Math.round(px);
+      const cy = Math.round(py);
+      for (let oy = -radius; oy <= radius; oy += 1) {
+        for (let ox = -radius; ox <= radius; ox += 1) {
+          const sx = Math.max(0, Math.min(canvas.width - 1, cx + ox));
+          const sy = Math.max(0, Math.min(canvas.height - 1, cy + oy));
+          const index = (sy * canvas.width + sx) * 4;
+          target.push(
+            image.data[index], image.data[index + 1],
+            image.data[index + 2], image.data[index + 3]
+          );
+        }
+      }
+    };
+    for (const v of [0.2, 0.4, 0.6, 0.8]) {
+      const left = {
+        x: shoulderL.x + (hipL.x - shoulderL.x) * v,
+        y: shoulderL.y + (hipL.y - shoulderL.y) * v,
+      };
+      const right = {
+        x: shoulderR.x + (hipR.x - shoulderR.x) * v,
+        y: shoulderR.y + (hipR.y - shoulderR.y) * v,
+      };
+      for (const u of [0.25, 0.5, 0.75]) {
+        samplePatch(torso, left.x + (right.x - left.x) * u, left.y + (right.y - left.y) * u);
+      }
+    }
+    for (const [hip, knee] of [[hipL, kneeL], [hipR, kneeR]]) {
+      for (const v of [0.08, 0.18, 0.28]) {
+        samplePatch(lower, hip.x + (knee.x - hip.x) * v, hip.y + (knee.y - hip.y) * v, 2);
+      }
+    }
+    return createRegionalColorHistogram([torso, lower]);
+  }
+
+  function poseTorsoScale(pose) {
+    if (!pose?.[11] || !pose?.[12] || !pose?.[23] || !pose?.[24]) return null;
+    const shoulderWidth = dist2D(pose[11], pose[12]);
+    const hipWidth = dist2D(pose[23], pose[24]);
+    const leftSide = dist2D(pose[11], pose[23]);
+    const rightSide = dist2D(pose[12], pose[24]);
+    const torsoLength = (leftSide + rightSide) / 2;
+    if (!shoulderWidth || !torsoLength) return null;
+    return Math.sqrt(shoulderWidth * torsoLength) + hipWidth * 0.15;
   }
 
   function lockPose(poseIndex, { forceRoi = false } = {}) {
@@ -1504,7 +1617,11 @@ export default function PoseCanvas({
     targetTrackIdRef.current = poseTrack.id;
     poseTrackerRef.current.touchTrack(poseTrack.id, performance.now());
     targetAnchorRef.current = center;
-    targetAppearanceRef.current = samplePoseAppearance(pose);
+    const appearance = samplePoseAppearance(pose);
+    targetAppearanceGalleryRef.current = appearance ? [appearance] : [];
+    targetReacquireRef.current = null;
+    targetTorsoScaleRef.current = poseTorsoScale(pose);
+    targetSearchPhaseRef.current = 0;
     targetUsesRoiRef.current = forceRoi || (poseTrack.box?.height || 1) < 0.35;
     lastSeenAtRef.current = Date.now();
     setHasTarget(true);
@@ -1519,12 +1636,15 @@ export default function PoseCanvas({
     return true;
   }
 
-  function detectPosesNearPoint(point) {
+  function detectPosesNearPoint(point, options = {}) {
     const lm = landmarkerRef.current;
     const video = videoRef.current;
     if (!lm || !video?.videoWidth || !video?.videoHeight) return [];
-    const cropWidth = 0.42;
-    const cropHeight = 0.82;
+    // Tap selection must stay tightly centered on the requested athlete.
+    // A wide crop lets MediaPipe return a larger nearby player instead of the
+    // smaller person directly under the cursor.
+    const cropWidth = options.cropWidth || 0.24;
+    const cropHeight = options.cropHeight || 0.72;
     const cropX = Math.max(0, Math.min(1 - cropWidth, point.x - cropWidth / 2));
     const cropY = Math.max(0, Math.min(1 - cropHeight, point.y - cropHeight * 0.52));
     const scan = document.createElement("canvas");
@@ -1663,7 +1783,10 @@ export default function PoseCanvas({
     if (running) return;
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
-    targetAppearanceRef.current = null;
+    targetAppearanceGalleryRef.current = [];
+    targetReacquireRef.current = null;
+    targetTorsoScaleRef.current = null;
+    targetSearchPhaseRef.current = 0;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
     setHasTarget(false);

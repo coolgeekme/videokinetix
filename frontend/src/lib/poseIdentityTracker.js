@@ -149,6 +149,15 @@ export class PoseIdentityTracker {
     return true;
   }
 
+  keepTrackAlive(trackId, nowMs = performance.now()) {
+    const track = this.tracks.get(trackId);
+    if (!track) return false;
+    // Preserve updatedAt so callers can continue extrapolating from the last
+    // real observation. Only prevent the selected identity from expiring.
+    track.lastSeenAt = nowMs;
+    return true;
+  }
+
   assignObservation(track, candidate, nowMs) {
     const dt = Math.max(0.016, (nowMs - track.updatedAt) / 1000);
     const rawVx = (candidate.center.x - track.center.x) / dt;

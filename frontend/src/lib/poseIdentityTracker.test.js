@@ -78,6 +78,19 @@ describe("PoseIdentityTracker", () => {
     expect(result.byPoseIndex.get(0).id).toBe(selectedId);
   });
 
+  test("keeps an occluded identity alive without erasing its motion clock", () => {
+    const tracker = new PoseIdentityTracker({ maxTrackAgeMs: 1000 });
+    let result = tracker.update([makePose(0.3)], 0);
+    const selectedId = result.byPoseIndex.get(0).id;
+    result = tracker.update([makePose(0.36)], 100);
+    const observedAt = tracker.getTrack(selectedId).updatedAt;
+
+    expect(tracker.keepTrackAlive(selectedId, 900)).toBe(true);
+    expect(tracker.getTrack(selectedId).updatedAt).toBe(observedAt);
+    tracker.update([], 1200);
+    expect(tracker.getTrack(selectedId)).not.toBeNull();
+  });
+
   test("binds a targeted ROI pose to the selected identity", () => {
     const tracker = new PoseIdentityTracker();
     let result = tracker.update([makePose(0.45)], 0);

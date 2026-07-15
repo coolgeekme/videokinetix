@@ -1,6 +1,8 @@
 import {
   appearanceSimilarity,
+  bestAppearanceSimilarity,
   blendAppearance,
+  createRegionalColorHistogram,
   createSpatialColorHistogram,
 } from "./appearanceDescriptor";
 
@@ -47,4 +49,18 @@ test("appearance blending adapts without replacing the identity", () => {
   );
   const blended = blendAppearance(a, b);
   expect(appearanceSimilarity(a, blended)).toBeGreaterThan(0.9);
+});
+
+test("pose-aligned clothing regions ignore changes outside the athlete", () => {
+  const blackBlue = createRegionalColorHistogram([
+    new Uint8ClampedArray([25, 25, 25, 255, 35, 35, 35, 255]),
+    new Uint8ClampedArray([20, 70, 190, 255, 25, 80, 200, 255]),
+  ]);
+  const blackRed = createRegionalColorHistogram([
+    new Uint8ClampedArray([25, 25, 25, 255, 35, 35, 35, 255]),
+    new Uint8ClampedArray([190, 35, 35, 255, 180, 30, 30, 255]),
+  ]);
+
+  expect(bestAppearanceSimilarity([blackBlue], blackBlue)).toBeCloseTo(1, 4);
+  expect(bestAppearanceSimilarity([blackBlue], blackRed)).toBeLessThan(0.7);
 });

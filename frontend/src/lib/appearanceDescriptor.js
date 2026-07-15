@@ -21,11 +21,51 @@ export function createSpatialColorHistogram(rgba, width, height) {
   return Float32Array.from(histogram, (value) => value / norm);
 }
 
+export function createRegionalColorHistogram(regions) {
+  const binsPerRegion = 64;
+  const histogram = new Float32Array(binsPerRegion * regions.length);
+  let populatedRegions = 0;
+  regions.forEach((region, regionIndex) => {
+    const offset = regionIndex * binsPerRegion;
+    let regionSamples = 0;
+    for (let i = 0; i + 3 < region.length; i += 4) {
+      if (region[i + 3] < 128) continue;
+      const r = Math.min(3, region[i] >> 6);
+      const g = Math.min(3, region[i + 1] >> 6);
+      const b = Math.min(3, region[i + 2] >> 6);
+      histogram[offset + r * 16 + g * 4 + b] += 1;
+      regionSamples += 1;
+    }
+    if (!regionSamples) return;
+    let regionNorm = 0;
+    for (let i = 0; i < binsPerRegion; i += 1) {
+      regionNorm += histogram[offset + i] * histogram[offset + i];
+    }
+    regionNorm = Math.sqrt(regionNorm) || 1;
+    for (let i = 0; i < binsPerRegion; i += 1) {
+      histogram[offset + i] /= regionNorm;
+    }
+    populatedRegions += 1;
+  });
+  if (!populatedRegions) return null;
+  const norm = Math.sqrt(populatedRegions);
+  return Float32Array.from(histogram, (value) => value / norm);
+}
+
 export function appearanceSimilarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
   let dot = 0;
   for (let i = 0; i < a.length; i += 1) dot += a[i] * b[i];
   return Math.max(0, Math.min(1, dot));
+}
+
+export function bestAppearanceSimilarity(gallery, candidate) {
+  if (!candidate || !gallery?.length) return 0;
+  let best = 0;
+  for (const descriptor of gallery) {
+    best = Math.max(best, appearanceSimilarity(descriptor, candidate));
+  }
+  return best;
 }
 
 export function blendAppearance(previous, current, alpha = 0.08) {
