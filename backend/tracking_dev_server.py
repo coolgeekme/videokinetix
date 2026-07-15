@@ -93,4 +93,3 @@ async def delete_tracking_session(session_id: str):
     if not manager.delete_session(LOCAL_USER_ID, session_id):
         raise HTTPException(404, "Tracking session not found")
     return {"deleted": True, "session_id": session_id}
-

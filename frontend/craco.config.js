@@ -61,6 +61,22 @@ let webpackConfig = {
 };
 
 webpackConfig.devServer = (devServerConfig) => {
+  // Keep local tracking on the same origin as the React app. This lets phones
+  // on the same Wi-Fi test through port 3000 without exposing the Python dev
+  // server through Windows Firewall.
+  const existingProxy = Array.isArray(devServerConfig.proxy)
+    ? devServerConfig.proxy
+    : [];
+  devServerConfig.proxy = [
+    {
+      context: ["/tracking-api"],
+      target: process.env.TRACKING_PROXY_TARGET || "http://127.0.0.1:8000",
+      changeOrigin: true,
+      pathRewrite: { "^/tracking-api": "" },
+    },
+    ...existingProxy,
+  ];
+
   // Add health check endpoints if enabled
   if (config.enableHealthCheck && setupHealthEndpoints && healthPluginInstance) {
     const originalSetupMiddlewares = devServerConfig.setupMiddlewares;
