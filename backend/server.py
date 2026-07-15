@@ -1,4 +1,5 @@
 """VisionKinetix.ai – AI Motion Capture Athlete Training Platform – FastAPI backend."""
+import json
 import logging
 import os
 import uuid
@@ -30,6 +31,11 @@ from storage import (  # noqa: E402
     init_storage,
     put_object,
 )
+from tracking_service import (  # noqa: E402
+    TrackingSessionManager,
+    TrackingSessionNotFoundError,
+    TrackingUnavailableError,
+)
 
 # ---------- DB ----------
 mongo_url = os.environ["MONGO_URL"]
@@ -42,6 +48,7 @@ api = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+tracking_manager = TrackingSessionManager()
 
 
 def now_iso() -> str:
@@ -861,6 +868,81 @@ async def delete_goal(goal_id: str, user_id: str = Depends(get_current_user_id))
     if res.deleted_count == 0:
         raise HTTPException(404, "Goal not found")
     return {"deleted": True, "id": goal_id}
+
+
+# ---------- Enhanced athlete tracking ----------
+@api.get("/tracking/status")
+async def tracking_status(user_id: str = Depends(get_current_user_id)):
+    # Authentication keeps deployment details out of the public health route.
+    _ = user_id
+    return tracking_manager.status()
+
+
+@api.post("/tracking/sessions")
+async def create_tracking_session(user_id: str = Depends(get_current_user_id)):
+    try:
+        session_id = tracking_manager.create_session(user_id)
+    except TrackingUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {
+        "session_id": session_id,
+        "engine": "roboflow-botsort",
+        "camera_motion_compensation": True,
+    }
+
+
+@api.post("/tracking/sessions/{session_id}/frame")
+async def update_tracking_session(
+    session_id: str,
+    detections: str = Form(...),
+    timestamp: Optional[float] = Form(default=None),
+    frame: Optional[UploadFile] = File(default=None),
+    user_id: str = Depends(get_current_user_id),
+):
+    try:
+        payload = json.loads(detections)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(400, "detections must be valid JSON") from exc
+    raw_detections = payload.get("detections") if isinstance(payload, dict) else None
+    if not isinstance(raw_detections, list):
+        raise HTTPException(400, "detections must contain a list")
+
+    frame_image = None
+    if frame is not None:
+        frame_bytes = await frame.read(2_000_001)
+        if len(frame_bytes) > 2_000_000:
+            raise HTTPException(413, "Tracking frame must be 2 MB or smaller")
+        try:
+            frame_image = tracking_manager.decode_frame(frame_bytes)
+        except (TrackingUnavailableError, ValueError) as exc:
+            status_code = 503 if isinstance(exc, TrackingUnavailableError) else 400
+            raise HTTPException(status_code, str(exc)) from exc
+
+    try:
+        tracks = tracking_manager.update_session(
+            user_id,
+            session_id,
+            raw_detections,
+            frame=frame_image,
+            timestamp=timestamp,
+        )
+    except TrackingUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except TrackingSessionNotFoundError as exc:
+        raise HTTPException(404, "Tracking session not found or expired") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"tracks": tracks, "timestamp": timestamp}
+
+
+@api.delete("/tracking/sessions/{session_id}")
+async def delete_tracking_session(
+    session_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    if not tracking_manager.delete_session(user_id, session_id):
+        raise HTTPException(404, "Tracking session not found")
+    return {"deleted": True, "session_id": session_id}
 
 
 # ---------- Health ----------
