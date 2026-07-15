@@ -55,16 +55,18 @@ const CAMERA_GUIDES = {
   },
   swimming: {
     label: "Swimming",
-    headline: "Pool-deck side-tracking · waist-up minimum in frame",
+    headline: "Side-on preferred · underwater approach works when swimmer is close",
     live_tips: [
-      "Pool-deck position: walk alongside the athlete or use a tripod on the deck.",
-      "Side-on view captures stroke recovery and high-elbow catch.",
-      "Keep camera height ~2-3 ft above water surface — too high distorts stroke arc.",
-      "Avoid heavy glare on the water; cloudy days or indoor pools work best.",
+      "For underwater head-on capture, keep the camera fully submerged and aim slightly down to avoid surface reflections.",
+      "Wait until the swimmer's shoulders and hips are clearly recognizable before starting capture.",
+      "For stroke biomechanics, a side-on underwater or pool-deck view remains the most accurate angle.",
+      "Keep the camera fixed; bubbles and rapid panning reduce pose confidence.",
     ],
     upload_tips: [
       "30-60 seconds of swim is enough — 4-8 stroke cycles.",
       "Trim out turns at the wall (we don't analyze those yet).",
+      "For head-on underwater clips, trim the distant approach where the swimmer is only a few pixels tall.",
+      "Surface reflections can resemble another person; fully submerged, slightly downward-facing footage tracks best.",
     ],
   },
 };

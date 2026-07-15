@@ -32,4 +32,34 @@ describe("assessFrameQuality", () => {
       "Athlete very small — zoom in or move camera closer"
     );
   });
+
+  test("does not require visible feet for an underwater swimmer", () => {
+    const pose = fullBodyPose(0.35);
+    pose[27].visibility = 0.05;
+    pose[28].visibility = 0.05;
+
+    const result = assessFrameQuality([pose], {
+      sport: "swimming",
+      cameraAspect: 0.56,
+    });
+
+    expect(result.issues.some((issue) => issue.includes("Feet not visible"))).toBe(false);
+    expect(result.issues.some((issue) => issue.includes("perpendicular side view"))).toBe(false);
+  });
+
+  test("asks an obscured underwater swimmer to approach before analysis", () => {
+    const pose = fullBodyPose(0.15).map((point) => ({
+      ...point,
+      visibility: 0.2,
+    }));
+
+    const result = assessFrameQuality([pose], {
+      sport: "swimming",
+      cameraAspect: 0.56,
+    });
+
+    expect(result.issues).toContain(
+      "Underwater pose confidence low — wait until swimmer is closer"
+    );
+  });
 });

@@ -207,6 +207,7 @@ export default function PoseCanvas({
   const targetReacquireRef = useRef(null);
   const targetTorsoScaleRef = useRef(null);
   const targetSearchPhaseRef = useRef(0);
+  const manualUnderwaterLockRef = useRef(false);
   const appearanceCanvasRef = useRef(null);
   const targetVisualTemplateRef = useRef(null);
   const targetVisualCanvasRef = useRef(null);
@@ -544,6 +545,33 @@ export default function PoseCanvas({
       });
       lastPoseTracksRef.current = poseTracks;
 
+      // A head-on underwater swimmer may not produce landmarks until they are
+      // relatively close. Preserve the user's manual lock, then bind the first
+      // credible pose that appears near that anchor.
+      if (
+        manualUnderwaterLockRef.current &&
+        targetTrackIdRef.current == null &&
+        targetAnchorRef.current &&
+        poses.length === 1
+      ) {
+        const candidateTrack = poseTracks.byPoseIndex.get(0);
+        const candidateCenter = hipCenter(poses[0]);
+        if (
+          candidateTrack &&
+          candidateCenter &&
+          dist2D(candidateCenter, targetAnchorRef.current) < 0.28
+        ) {
+          targetTrackIdRef.current = candidateTrack.id;
+          targetAnchorRef.current = candidateCenter;
+          targetAppearanceGalleryRef.current = [
+            samplePoseAppearance(poses[0]),
+          ].filter(Boolean);
+          targetTorsoScaleRef.current = poseTorsoScale(poses[0]);
+          manualUnderwaterLockRef.current = false;
+          lastSeenAtRef.current = Date.now();
+        }
+      }
+
       // Resolve the selected persistent track ID to this frame's pose.
       let targetIdx = -1;
       const targetTrack = targetTrackIdRef.current != null
@@ -686,9 +714,12 @@ export default function PoseCanvas({
         const similarity = gallery.length
           ? bestAppearanceSimilarity(gallery, appearance)
           : 1;
+        const adaptationThreshold = sport === "swimming"
+          ? 0.3
+          : selectedEnhancedTrack ? 0.44 : 0.56;
         if (
           appearance &&
-          (!gallery.length || similarity >= (selectedEnhancedTrack ? 0.44 : 0.56))
+          (!gallery.length || similarity >= adaptationThreshold)
         ) {
           const blended = gallery.length
             ? blendAppearance(gallery[0], appearance, 0.12)
@@ -707,7 +738,17 @@ export default function PoseCanvas({
       if (nowQ - lastQualityUpdateRef.current > 500) {
         lastQualityUpdateRef.current = nowQ;
         const qualityPoses = targetIdx >= 0 ? [poses[targetIdx]] : poses;
-        setFrameQuality(assessFrameQuality(qualityPoses, { sport }));
+        setFrameQuality(
+          manualUnderwaterLockRef.current
+            ? {
+                level: "fair",
+                issues: ["Swimmer selected — pose capture will begin when the torso is visible"],
+              }
+            : assessFrameQuality(qualityPoses, {
+                sport,
+                cameraAspect: w / h,
+              })
+        );
       }
 
       // Draw detector/tracker boxes first. These boxes are independent of pose
@@ -743,6 +784,36 @@ export default function PoseCanvas({
           ctx.fillText(label, x1 + 7, Math.max(11, y1 - 11));
           ctx.restore();
         });
+      }
+
+      // Keep a visible, stable manual selection while the swimmer is too far
+      // or too obscured for pose landmarks. This is a search region, not a
+      // fabricated skeleton; motion capture begins when a valid pose appears.
+      if (manualUnderwaterLockRef.current && targetAnchorRef.current) {
+        const boxWidth = 0.38;
+        const boxHeight = 0.58;
+        const x1 = Math.max(0, targetAnchorRef.current.x - boxWidth / 2) * w;
+        const y1 = Math.max(0, targetAnchorRef.current.y - boxHeight * 0.46) * h;
+        const x2 = Math.min(1, targetAnchorRef.current.x + boxWidth / 2) * w;
+        const y2 = Math.min(1, targetAnchorRef.current.y + boxHeight * 0.54) * h;
+        const label = "SWIMMER SEARCH";
+        ctx.save();
+        ctx.strokeStyle = TARGET_COLOR;
+        ctx.lineWidth = 5;
+        ctx.setLineDash([12, 8]);
+        ctx.shadowColor = TARGET_COLOR;
+        ctx.shadowBlur = 12;
+        ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.font = "bold 13px sans-serif";
+        const labelWidth = ctx.measureText(label).width + 14;
+        ctx.fillStyle = TARGET_COLOR;
+        ctx.fillRect(x1, Math.max(0, y1 - 22), labelWidth, 22);
+        ctx.fillStyle = "#050505";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, x1 + 7, Math.max(11, y1 - 11));
+        ctx.restore();
       }
 
       // Draw all poses; highlight the target
@@ -1017,6 +1088,7 @@ export default function PoseCanvas({
     targetReacquireRef.current = null;
     targetTorsoScaleRef.current = null;
     targetSearchPhaseRef.current = 0;
+    manualUnderwaterLockRef.current = false;
     targetVisualTemplateRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;
@@ -1254,7 +1326,8 @@ export default function PoseCanvas({
                   v,
                   personDetectorRef.current,
                   trackingTimestamp,
-                  lastPosesRef.current
+                  lastPosesRef.current,
+                  { sport }
                 )
                 .then((tracks) => {
                   if (cancelled || !tracks) return;
@@ -1362,7 +1435,13 @@ export default function PoseCanvas({
                 const lostForMs = lastSeenAtRef.current == null
                   ? 0
                   : Date.now() - lastSeenAtRef.current;
-                const visualCenter = enhancedRoi ? null : trackTargetVisual(lostForMs);
+                const underwaterApproach = sport === "swimming" &&
+                  v.videoHeight > v.videoWidth;
+                // Underwater reflections, bubbles, and caustics change too
+                // quickly for grayscale template matching to be trustworthy.
+                const visualCenter = enhancedRoi || underwaterApproach
+                  ? null
+                  : trackTargetVisual(lostForMs);
                 // The local pose prediction is updated on the current video
                 // frame. Prefer it over the asynchronous detector ROI so the
                 // crop moves with the athlete instead of chasing old boxes.
@@ -1370,9 +1449,18 @@ export default function PoseCanvas({
                   ? predictedCenter
                   : enhancedRoi?.center || visualCenter || predictedCenter;
                 let searchCenter = identityCenter;
-                let searchWidth = enhancedRoi?.width || 0.38;
-                let searchHeight = enhancedRoi?.height || 0.72;
-                if (lostForMs > 300 && !visualCenter && !enhancedRoi) {
+                let searchWidth = underwaterApproach
+                  ? 0.9
+                  : enhancedRoi?.width || 0.38;
+                let searchHeight = underwaterApproach
+                  ? 0.72
+                  : enhancedRoi?.height || 0.72;
+                if (
+                  lostForMs > 300 &&
+                  !visualCenter &&
+                  !enhancedRoi &&
+                  !underwaterApproach
+                ) {
                   // Sweep narrow, person-sized crops instead of widening one
                   // crop that would make MediaPipe favor the largest player.
                   const offsets = [-0.3, 0, 0.3];
@@ -1388,7 +1476,7 @@ export default function PoseCanvas({
                   cropWidth: searchWidth,
                   cropHeight: searchHeight,
                 });
-                if (lostForMs > 220) {
+                if (lostForMs > 220 && !underwaterApproach) {
                   // Narrow ROI inference is best while the target is visible,
                   // but it cannot recover from a sudden sprint outside the old
                   // crop. During a loss, scan the full frame and let appearance,
@@ -1407,14 +1495,20 @@ export default function PoseCanvas({
                   const d = dist2D(hipCenter(pose), identityCenter);
                   const maximumDistance = enhancedRoi
                     ? Math.max(0.24, Math.min(0.48, enhancedRoi.height * 0.58))
-                    : lostForMs > 300 ? 0.42 : 0.2;
+                    : underwaterApproach
+                      ? lostForMs > 300 ? 0.5 : 0.34
+                      : lostForMs > 300 ? 0.42 : 0.2;
                   if (d > maximumDistance) continue;
                   const candidateTorsoScale = poseTorsoScale(pose);
                   const lockedTorsoScale = targetTorsoScaleRef.current;
                   const torsoRatio = lockedTorsoScale && candidateTorsoScale
                     ? candidateTorsoScale / lockedTorsoScale
                     : 1;
-                  const maximumScaleChange = enhancedRoi ? 1.05 : 0.58;
+                  // A swimmer moving directly toward the camera can grow by
+                  // several times in only a few seconds.
+                  const maximumScaleChange = underwaterApproach
+                    ? 1.5
+                    : enhancedRoi ? 1.05 : 0.58;
                   if (
                     lockedTorsoScale && candidateTorsoScale &&
                     Math.abs(Math.log(torsoRatio)) > maximumScaleChange
@@ -1427,14 +1521,16 @@ export default function PoseCanvas({
                     ? bestAppearanceSimilarity(gallery, appearance)
                     : insideDetectorCandidate ? 0.6 : 1;
                   const spatiallyContinuous = Boolean(
-                    insideDetectorCandidate &&
+                    (insideDetectorCandidate || underwaterApproach) &&
                     lostForMs < 400 &&
-                    d < 0.18
+                    d < (underwaterApproach ? 0.24 : 0.18)
                   );
                   // If somebody crosses in front, reject their pose instead of
                   // allowing it to steal the selected identity. Missing frames
                   // are safer than analyzing the wrong athlete.
-                  const minimumSimilarity = enhancedRoi ? 0.44 : 0.52;
+                  const minimumSimilarity = underwaterApproach
+                    ? 0.3
+                    : enhancedRoi ? 0.44 : 0.52;
                   if (
                     gallery.length &&
                     !spatiallyContinuous &&
@@ -1459,6 +1555,9 @@ export default function PoseCanvas({
                       hipCenter
                     ) === 0;
                   const continuousMatch =
+                    (underwaterApproach &&
+                      recentlyVisible &&
+                      dist2D(center, identityCenter) < 0.24) ||
                     (insideSelectedDetector &&
                       (closestSimilarity >= 0.44 ||
                         (recentlyVisible && dist2D(center, identityCenter) < 0.18))) ||
@@ -2264,6 +2363,7 @@ export default function PoseCanvas({
     targetReacquireRef.current = null;
     targetTorsoScaleRef.current = poseTorsoScale(pose);
     targetSearchPhaseRef.current = 0;
+    manualUnderwaterLockRef.current = false;
     captureTargetVisualTemplate(pose);
     const identityHeight = identityTrack
       ? identityTrack.y2 - identityTrack.y1
@@ -2272,8 +2372,11 @@ export default function PoseCanvas({
     // Moving a VIDEO-mode MediaPipe crop every frame introduces temporal lag.
     // Reserve close-up inference for genuinely small/far athletes; normal-sized
     // athletes use the native full frame so landmarks and video stay aligned.
-    targetUsesRoiRef.current = Boolean(forceRoi) &&
-      observedHeight < SMALL_TARGET_ROI_HEIGHT;
+    const video = videoRef.current;
+    const underwaterApproach = sport === "swimming" &&
+      video?.videoHeight > video?.videoWidth;
+    targetUsesRoiRef.current = underwaterApproach ||
+      (Boolean(forceRoi) && observedHeight < SMALL_TARGET_ROI_HEIGHT);
     lastSeenAtRef.current = Date.now();
     setHasTarget(true);
     setTrackingLost(false);
@@ -2330,6 +2433,9 @@ export default function PoseCanvas({
   }
 
   async function findAndLockPoseAtPoint(click) {
+    const video = videoRef.current;
+    const underwaterApproach = sport === "swimming" &&
+      video?.videoHeight > video?.videoWidth;
     const enhancedSelection =
       enhancedTrackingReadyRef.current &&
       Date.now() - enhancedTracksUpdatedAtRef.current < 1000
@@ -2357,11 +2463,36 @@ export default function PoseCanvas({
       await new Promise((resolve) => requestAnimationFrame(resolve));
       const closeUpPoses = detectPosesNearPoint(
         enhancedRoi?.center || click,
-        enhancedRoi
-          ? { cropWidth: enhancedRoi.width, cropHeight: enhancedRoi.height }
-          : undefined
+        underwaterApproach
+          ? { cropWidth: 0.9, cropHeight: 0.72 }
+          : enhancedRoi
+            ? { cropWidth: enhancedRoi.width, cropHeight: enhancedRoi.height }
+            : undefined
       );
-      if (!closeUpPoses.length) return false;
+      if (!closeUpPoses.length) {
+        if (!underwaterApproach) return false;
+        selectedEnhancedTrackIdRef.current = null;
+        targetTrackIdRef.current = null;
+        targetAnchorRef.current = click;
+        targetUsesRoiRef.current = true;
+        targetAppearanceGalleryRef.current = [];
+        targetTorsoScaleRef.current = null;
+        targetReacquireRef.current = null;
+        manualUnderwaterLockRef.current = true;
+        lastSeenAtRef.current = Date.now();
+        setHasTarget(true);
+        setTrackingLost(false);
+        setError(null);
+        setPlacementStep("ready");
+        setFrameQuality({
+          level: "fair",
+          issues: ["Swimmer selected — pose capture will begin when the torso is visible"],
+        });
+        requestAnimationFrame(() => {
+          drawResults({ landmarks: lastPosesRef.current });
+        });
+        return true;
+      }
       let selectedPose;
       if (enhancedSelection) {
         const trackedPoseIndex = poseIndexInsideTrack(
@@ -2486,6 +2617,7 @@ export default function PoseCanvas({
     targetReacquireRef.current = null;
     targetTorsoScaleRef.current = null;
     targetSearchPhaseRef.current = 0;
+    manualUnderwaterLockRef.current = false;
     targetVisualTemplateRef.current = null;
     targetAnchorRef.current = null;
     lastSeenAtRef.current = null;

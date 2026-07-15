@@ -7,6 +7,7 @@ import {
   poseDetectionsFromLandmarks,
   poseIndexInsideTrack,
   poseMatchesTrack,
+  removeUnderwaterReflections,
 } from "./enhancedTracking";
 
 describe("enhanced athlete tracking helpers", () => {
@@ -166,5 +167,17 @@ describe("enhanced athlete tracking helpers", () => {
       pose,
       { x1: 0.38, y1: 0.15, x2: 0.48, y2: 0.8 }
     )).toBe(true);
+  });
+
+  test("removes surface reflections but keeps the submerged swimmer", () => {
+    const reflection = { xyxy: [100, 0, 220, 150], confidence: 0.9 };
+    const deepReflection = { xyxy: [80, 90, 240, 310], confidence: 0.8 };
+    const swimmer = { xyxy: [90, 170, 260, 430], confidence: 0.7 };
+    expect(removeUnderwaterReflections(
+      [reflection, deepReflection, swimmer],
+      500
+    )).toEqual([
+      swimmer,
+    ]);
   });
 });

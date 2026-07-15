@@ -104,6 +104,17 @@ export function mergePersonDetections(detectorDetections, poseDetections) {
   return [...detectorBoxes, ...supplementalPoses];
 }
 
+export function removeUnderwaterReflections(detections, frameHeight) {
+  if (!frameHeight) return detections || [];
+  return (detections || []).filter((detection) => {
+    const [, y1, , y2] = detection.xyxy;
+    const centerY = (y1 + y2) / 2;
+    // In this capture geometry the swimmer approaches through the lower half
+    // while the false "people" are water-surface reflections above them.
+    return centerY >= frameHeight * 0.48 || y2 >= frameHeight * 0.72;
+  });
+}
+
 export function poseMatchesTrack(pose, track) {
   if (!track || !Array.isArray(pose)) return false;
   const core = [11, 12, 23, 24]
@@ -254,7 +265,7 @@ export class EnhancedTrackingClient {
     }
   }
 
-  async process(video, detector, timestampMs, poses = []) {
+  async process(video, detector, timestampMs, poses = [], options = {}) {
     if (!this.sessionId || !video?.videoWidth || !detector || this.inFlight) return null;
     this.inFlight = true;
     try {
@@ -265,7 +276,7 @@ export class EnhancedTrackingClient {
       const context = this.canvas.getContext("2d");
       context.drawImage(video, 0, 0, width, height);
       const result = detector.detectForVideo(this.canvas, timestampMs);
-      const detectorDetections = (result?.detections || []).map((detection) => {
+      let detectorDetections = (result?.detections || []).map((detection) => {
         const box = detection.boundingBox;
         return {
           xyxy: [
@@ -277,7 +288,12 @@ export class EnhancedTrackingClient {
           confidence: detection.categories?.[0]?.score ?? 0,
         };
       });
-      const poseDetections = poseDetectionsFromLandmarks(poses, width, height);
+      let poseDetections = poseDetectionsFromLandmarks(poses, width, height);
+      const underwaterApproach = options.sport === "swimming" && height > width;
+      if (underwaterApproach) {
+        detectorDetections = removeUnderwaterReflections(detectorDetections, height);
+        poseDetections = removeUnderwaterReflections(poseDetections, height);
+      }
       const detections = mergePersonDetections(
         detectorDetections,
         poseDetections
