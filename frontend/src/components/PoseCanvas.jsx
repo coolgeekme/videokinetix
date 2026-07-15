@@ -38,6 +38,8 @@ const JOINT_COLOR_TARGET = "#ff3b30";
 // Delay before warning that the selected persistent identity is absent.
 const TRACKING_LOST_GRACE_MS = 1500;
 const TRACKED_ROI_PADDING = 0.4;
+const SMALL_TARGET_ROI_HEIGHT = 0.22;
+const ENHANCED_TRACK_MAX_AGE_MS = 350;
 
 let landmarkerLoaderPromise = null;
 async function loadPoseLandmarker() {
@@ -527,7 +529,7 @@ export default function PoseCanvas({
       const enhancedTracks = enhancedTracksRef.current;
       const enhancedTrackingFresh =
         enhancedTrackingReadyRef.current &&
-        Date.now() - enhancedTracksUpdatedAtRef.current < 1000;
+        Date.now() - enhancedTracksUpdatedAtRef.current < ENHANCED_TRACK_MAX_AGE_MS;
       setPersonCount(
         enhancedTrackingFresh
           ? Math.max(enhancedTracks.length, poses.length)
@@ -545,10 +547,17 @@ export default function PoseCanvas({
         ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
         : null;
       if (targetTrack?.poseIndex >= 0 && targetTrack.landmarks) {
-        targetIdx = targetTrack.poseIndex;
-        targetAnchorRef.current = targetTrack.center;
-        syncTargetVisualAnchor(targetTrack.landmarks);
-        lastSeenAtRef.current = Date.now();
+        const localAppearance = samplePoseAppearance(targetTrack.landmarks);
+        const gallery = targetAppearanceGalleryRef.current;
+        const localSimilarity = gallery.length && localAppearance
+          ? bestAppearanceSimilarity(gallery, localAppearance)
+          : 1;
+        if (!gallery.length || localSimilarity >= 0.5) {
+          targetIdx = targetTrack.poseIndex;
+          targetAnchorRef.current = targetTrack.center;
+          syncTargetVisualAnchor(targetTrack.landmarks);
+          lastSeenAtRef.current = Date.now();
+        }
       }
 
       // BoT-SORT owns identity whenever it is active. MediaPipe remains the
@@ -563,11 +572,81 @@ export default function PoseCanvas({
           selectedEnhancedTrack,
           hipCenter
         );
-        const roi = paddedTrackRoi(selectedEnhancedTrack, TRACKED_ROI_PADDING);
-        if (roi) targetAnchorRef.current = roi.center;
         if (enhancedPoseIndex >= 0) {
-          targetIdx = enhancedPoseIndex;
-          lastSeenAtRef.current = Date.now();
+          const candidateAppearance = samplePoseAppearance(poses[enhancedPoseIndex]);
+          const gallery = targetAppearanceGalleryRef.current;
+          const similarity = gallery.length && candidateAppearance
+            ? bestAppearanceSimilarity(gallery, candidateAppearance)
+            : 1;
+          // BoT-SORT IDs can move to a different player after a crossing or
+          // edit cut. Never let the numeric ID override a failed appearance
+          // check and transfer motion capture to that athlete.
+          if (!gallery.length || similarity >= 0.5) {
+            targetIdx = enhancedPoseIndex;
+            lastSeenAtRef.current = Date.now();
+          }
+        }
+      }
+
+      // Edited clips can teleport the selected athlete across the frame. That
+      // invalidates every motion/IoU prediction even though their appearance is
+      // still present. Rebind only after the same appearance candidate wins two
+      // consecutive full-frame detections.
+      if (
+        targetIdx === -1 &&
+        targetTrackIdRef.current != null &&
+        !targetUsesRoiRef.current &&
+        poses.length &&
+        targetAppearanceGalleryRef.current.length
+      ) {
+        let bestCandidate = null;
+        for (let index = 0; index < poses.length; index += 1) {
+          const pose = poses[index];
+          const center = hipCenter(pose);
+          const appearance = samplePoseAppearance(pose);
+          if (!center || !appearance) continue;
+          const similarity = bestAppearanceSimilarity(
+            targetAppearanceGalleryRef.current,
+            appearance
+          );
+          if (similarity < 0.62) continue;
+          const candidateScale = poseTorsoScale(pose);
+          const lockedScale = targetTorsoScaleRef.current;
+          if (
+            candidateScale && lockedScale &&
+            Math.abs(Math.log(candidateScale / lockedScale)) > 0.72
+          ) continue;
+          const distance = targetAnchorRef.current
+            ? dist2D(center, targetAnchorRef.current)
+            : 0;
+          const score = similarity * 3 - Math.min(distance, 0.7) * 0.45;
+          if (!bestCandidate || score > bestCandidate.score) {
+            bestCandidate = { index, center, similarity, score };
+          }
+        }
+        if (bestCandidate) {
+          const pending = targetReacquireRef.current;
+          const sameCandidate = pending &&
+            dist2D(pending.center, bestCandidate.center) < 0.18 &&
+            Date.now() - pending.at < 700;
+          targetReacquireRef.current = {
+            center: bestCandidate.center,
+            frames: sameCandidate ? pending.frames + 1 : 1,
+            at: Date.now(),
+          };
+          if (targetReacquireRef.current.frames >= 2) {
+            const reboundTrack = poseTracks.byPoseIndex.get(bestCandidate.index);
+            if (reboundTrack) targetTrackIdRef.current = reboundTrack.id;
+            targetIdx = bestCandidate.index;
+            targetAnchorRef.current = bestCandidate.center;
+            const reboundEnhanced = findTrackAtPoint(
+              enhancedTracks,
+              bestCandidate.center
+            );
+            selectedEnhancedTrackIdRef.current = reboundEnhanced?.id ?? null;
+            targetReacquireRef.current = null;
+            lastSeenAtRef.current = Date.now();
+          }
         }
       }
 
@@ -617,6 +696,10 @@ export default function PoseCanvas({
       if (enhancedTrackingFresh) {
         enhancedTracks.forEach((track) => {
           const isTarget = track.id === selectedEnhancedTrackIdRef.current;
+          // A detector response can trail the video by several frames. Once a
+          // current-frame target pose exists, its pose box below is the visual
+          // source of truth; keep the BoT-SORT box only as an occlusion fallback.
+          if (isTarget && targetIdx >= 0) return;
           const colour = isTarget
             ? TARGET_COLOR
             : PERSON_COLORS[Math.abs(track.id) % PERSON_COLORS.length];
@@ -667,9 +750,11 @@ export default function PoseCanvas({
           enhancedTrackingFresh &&
           selectedEnhancedTrackIdRef.current != null &&
           !selectedEnhancedTrack;
-        const box = representedByDetector && !(isTarget && selectedDetectorMissing)
-          ? null
-          : poseTrack?.box;
+        const box = isTarget
+          ? poseTrack?.box
+          : representedByDetector && !selectedDetectorMissing
+            ? null
+            : poseTrack?.box;
         if (box) {
           const padX = 0.012;
           const padY = 0.018;
@@ -849,6 +934,7 @@ export default function PoseCanvas({
         const lm = poses[targetIdx];
         framesRef.current.push({
           t,
+          video_time: mode === "upload" ? video.currentTime : null,
           lm: lm.map((p) => ({ x: p.x, y: p.y, visibility: p.visibility })),
           tracker_id: selectedEnhancedTrack?.id ?? targetTrackIdRef.current,
           tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
@@ -888,6 +974,7 @@ export default function PoseCanvas({
         const t = (Date.now() - startedAtRef.current) / 1000;
         framesRef.current.push({
           t,
+          video_time: mode === "upload" ? video.currentTime : null,
           lm: null,
           tracker_id: selectedEnhancedTrackIdRef.current ?? targetTrackIdRef.current,
           tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
@@ -1207,9 +1294,10 @@ export default function PoseCanvas({
                     identityTrack,
                     TRACKED_ROI_PADDING
                   );
-                  if (roi) {
-                    targetAnchorRef.current = roi.center;
-                    targetUsesRoiRef.current = true;
+                  if (roi && targetUsesRoiRef.current) {
+                    const localTargetFresh = localTarget?.updatedAt != null &&
+                      performance.now() - localTarget.updatedAt < 220;
+                    if (!localTargetFresh) targetAnchorRef.current = roi.center;
                   }
                   if (v.paused && !runningRef.current) {
                     drawResults({ landmarks: lastPosesRef.current });
@@ -1256,7 +1344,12 @@ export default function PoseCanvas({
                   ? 0
                   : Date.now() - lastSeenAtRef.current;
                 const visualCenter = enhancedRoi ? null : trackTargetVisual(lostForMs);
-                const identityCenter = enhancedRoi?.center || visualCenter || predictedCenter;
+                // The local pose prediction is updated on the current video
+                // frame. Prefer it over the asynchronous detector ROI so the
+                // crop moves with the athlete instead of chasing old boxes.
+                const identityCenter = selectedTrack?.center
+                  ? predictedCenter
+                  : enhancedRoi?.center || visualCenter || predictedCenter;
                 let searchCenter = identityCenter;
                 let searchWidth = enhancedRoi?.width || 0.38;
                 let searchHeight = enhancedRoi?.height || 0.72;
@@ -2124,7 +2217,15 @@ export default function PoseCanvas({
     targetTorsoScaleRef.current = poseTorsoScale(pose);
     targetSearchPhaseRef.current = 0;
     captureTargetVisualTemplate(pose);
-    targetUsesRoiRef.current = forceRoi || (poseTrack.box?.height || 1) < 0.35;
+    const identityHeight = identityTrack
+      ? identityTrack.y2 - identityTrack.y1
+      : null;
+    const observedHeight = identityHeight || poseTrack.box?.height || 1;
+    // Moving a VIDEO-mode MediaPipe crop every frame introduces temporal lag.
+    // Reserve close-up inference for genuinely small/far athletes; normal-sized
+    // athletes use the native full frame so landmarks and video stay aligned.
+    targetUsesRoiRef.current = Boolean(forceRoi) &&
+      observedHeight < SMALL_TARGET_ROI_HEIGHT;
     lastSeenAtRef.current = Date.now();
     setHasTarget(true);
     setTrackingLost(false);
@@ -2580,16 +2681,25 @@ export default function PoseCanvas({
       if (bestDist < 0.6) return best.dataUrl;
     }
     const v = videoRef.current;
-    const c = canvasRef.current;
-    if (mode === "upload" && v && c) {
+    if (mode === "upload" && v) {
       try {
+        const recordedFrame = framesRef.current.reduce((best, frame) => {
+          if (!frame?.lm) return best;
+          if (!best) return frame;
+          return Math.abs(frame.t - timeS) < Math.abs(best.t - timeS)
+            ? frame
+            : best;
+        }, null);
+        const seekTime = Number.isFinite(recordedFrame?.video_time)
+          ? recordedFrame.video_time
+          : timeS;
         await new Promise((resolve) => {
           const onSeeked = () => {
             v.removeEventListener("seeked", onSeeked);
             resolve();
           };
           v.addEventListener("seeked", onSeeked);
-          v.currentTime = Math.min(timeS, v.duration - 0.05);
+          v.currentTime = Math.min(seekTime, v.duration - 0.05);
           setTimeout(resolve, 800);
         });
         // Smaller + lower-quality thumbnail keeps the upload payload tiny
@@ -2601,7 +2711,44 @@ export default function PoseCanvas({
         off.height = th;
         const octx = off.getContext("2d");
         octx.drawImage(v, 0, 0, tw, th);
-        octx.drawImage(c, 0, 0, tw, th);
+        const pose = recordedFrame?.lm;
+        if (pose) {
+          octx.save();
+          octx.strokeStyle = TARGET_COLOR;
+          octx.fillStyle = JOINT_COLOR_TARGET;
+          octx.lineWidth = 3;
+          octx.lineCap = "round";
+          for (const [a, b] of POSE_CONNECTIONS) {
+            const pa = pose[a];
+            const pb = pose[b];
+            if (!pa || !pb) continue;
+            if ((pa.visibility ?? 1) < 0.2 || (pb.visibility ?? 1) < 0.2) continue;
+            octx.beginPath();
+            octx.moveTo(pa.x * tw, pa.y * th);
+            octx.lineTo(pb.x * tw, pb.y * th);
+            octx.stroke();
+          }
+          const visible = pose
+            .slice(11)
+            .filter((point) => point && (point.visibility ?? 1) >= 0.2);
+          for (const point of visible) {
+            octx.beginPath();
+            octx.arc(point.x * tw, point.y * th, 3, 0, Math.PI * 2);
+            octx.fill();
+          }
+          if (visible.length >= 4) {
+            const xs = visible.map((point) => point.x * tw);
+            const ys = visible.map((point) => point.y * th);
+            const x1 = Math.max(0, Math.min(...xs) - 10);
+            const y1 = Math.max(0, Math.min(...ys) - 10);
+            const x2 = Math.min(tw, Math.max(...xs) + 10);
+            const y2 = Math.min(th, Math.max(...ys) + 10);
+            octx.strokeStyle = TARGET_COLOR;
+            octx.lineWidth = 3;
+            octx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+          }
+          octx.restore();
+        }
         return off.toDataURL("image/jpeg", 0.55);
       } catch {
         return null;
