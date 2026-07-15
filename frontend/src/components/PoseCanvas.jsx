@@ -21,6 +21,7 @@ import {
   poseMatchesTrack,
 } from "../lib/enhancedTracking";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
+import { getCapturePlaybackPlan } from "@/lib/capturePlayback";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
 const POSE_CONNECTIONS = [
@@ -185,6 +186,8 @@ export default function PoseCanvas({
   const lastThumbAtRef = useRef(0);
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
+  const stopCaptureRef = useRef(null);
+  const capturePlaybackCleanupRef = useRef(null);
 
   // Latest detected poses + target tracking
   const lastPosesRef = useRef([]); // current frame's poses
@@ -1816,6 +1819,8 @@ export default function PoseCanvas({
       const enhancedClient = enhancedClientRef.current;
       enhancedClientRef.current = null;
       if (enhancedClient) enhancedClient.stop();
+      capturePlaybackCleanupRef.current?.();
+      capturePlaybackCleanupRef.current = null;
       // Don't close the landmarker — we cache it across mounts via the loader promise
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1826,12 +1831,31 @@ export default function PoseCanvas({
     if (!running) return;
     startedAtRef.current = Date.now();
     const interval = setInterval(() => {
+      if (mode === "upload") {
+        const video = videoRef.current;
+        const { end: analysisEnd } = getCapturePlaybackPlan({
+          currentTime: video?.currentTime,
+          duration: video?.duration,
+          ended: video?.ended,
+          trimStart,
+          trimEnd,
+        });
+        if (
+          video && Number.isFinite(analysisEnd) &&
+          (video.ended || video.currentTime >= analysisEnd - 0.2)
+        ) {
+          // `ended`/`timeupdate` is not guaranteed to fire when capture starts
+          // on a terminal frame. This guard prevents an infinite REC timer.
+          setTimeout(() => stopCaptureRef.current?.(), 0);
+          return;
+        }
+      }
       setDuration(
         Math.floor((Date.now() - startedAtRef.current) / 1000)
       );
     }, 500);
     return () => clearInterval(interval);
-  }, [running]);
+  }, [running, mode, trimEnd, trimStart]);
 
   /* ---------------- Video play/pause state sync (upload mode) ---------------- */
   useEffect(() => {
@@ -2603,12 +2627,52 @@ export default function PoseCanvas({
     });
   }
 
-  function start() {
+  async function start() {
     if (!hasTarget) {
       setError("Tap the athlete you want to track first.");
       return;
     }
+    const v = videoRef.current;
+    if (v && mode === "upload") {
+      const playbackPlan = getCapturePlaybackPlan({
+        currentTime: v.currentTime,
+        duration: v.duration,
+        ended: v.ended,
+        trimStart,
+        trimEnd,
+      });
+      if (playbackPlan.shouldRewind) {
+        try {
+          v.pause();
+          await new Promise((resolve) => {
+            let settled = false;
+            const finish = () => {
+              if (settled) return;
+              settled = true;
+              v.removeEventListener("seeked", finish);
+              resolve();
+            };
+            v.addEventListener("seeked", finish);
+            v.currentTime = playbackPlan.start;
+            setTimeout(finish, 800);
+          });
+          lastDetectVideoTimeRef.current = -1;
+          lastPosesRef.current = [];
+          lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
+          enhancedTracksRef.current = [];
+          enhancedTracksUpdatedAtRef.current = 0;
+          selectedEnhancedTrackIdRef.current = null;
+          targetReacquireRef.current = null;
+          if (enhancedClientRef.current) {
+            await enhancedClientRef.current.restart();
+          }
+        } catch (rewindError) {
+          console.warn("[PoseCanvas] capture rewind failed", rewindError);
+        }
+      }
+    }
     setError(null);
+    setTrackingLost(false);
     framesRef.current = [];
     thumbsRef.current = [];
     lastThumbAtRef.current = 0;
@@ -2639,7 +2703,6 @@ export default function PoseCanvas({
         console.warn("[PoseCanvas] failed to start MediaRecorders", e);
       }
     }
-    const v = videoRef.current;
     if (v && mode === "upload") {
       // Only seek backward if user is BEFORE the trim window. If they scrubbed
       // forward to find their athlete, respect that position — otherwise we'd
@@ -2657,6 +2720,10 @@ export default function PoseCanvas({
       const playPromise = v.play();
       if (playPromise && playPromise.catch) {
         playPromise.catch(() => {
+          runningRef.current = false;
+          setRunning(false);
+          setStatus("ready");
+          stopRecorders();
           setError(
             "Browser blocked auto-play. Tap the video, then press Start again."
           );
@@ -2664,29 +2731,31 @@ export default function PoseCanvas({
       }
       // Auto-stop when reaching the trim end
       const end = trimEnd && trimEnd > (trimStart || 0) ? trimEnd : null;
+      capturePlaybackCleanupRef.current?.();
+      capturePlaybackCleanupRef.current = null;
+      const cleanupPlaybackListeners = () => {
+        v.removeEventListener("timeupdate", onTime);
+        v.removeEventListener("ended", onEnded);
+      };
+      const finishPlaybackCapture = () => {
+        cleanupPlaybackListeners();
+        capturePlaybackCleanupRef.current = null;
+        if (!v.paused) v.pause();
+        if (runningRef.current) {
+          setTimeout(() => stopCaptureRef.current?.(), 0);
+        }
+      };
+      const onTime = () => {
+        if (end != null && v.currentTime >= end - 0.05) {
+          finishPlaybackCapture();
+        }
+      };
+      const onEnded = () => finishPlaybackCapture();
       if (end != null) {
-        const onTime = () => {
-          if (!videoRef.current) return;
-          if (videoRef.current.currentTime >= end) {
-            videoRef.current.removeEventListener("timeupdate", onTime);
-            videoRef.current.pause();
-            setRunning((r) => {
-              if (!r) return r;
-              setTimeout(() => stop(), 0);
-              return r;
-            });
-          }
-        };
         v.addEventListener("timeupdate", onTime);
       }
-      v.onended = () => {
-        if (videoRef.current && !videoRef.current.paused) videoRef.current.pause();
-        setRunning((r) => {
-          if (!r) return r;
-          setTimeout(() => stop(), 0);
-          return r;
-        });
-      };
+      v.addEventListener("ended", onEnded);
+      capturePlaybackCleanupRef.current = cleanupPlaybackListeners;
     }
   }
 
@@ -2782,7 +2851,10 @@ export default function PoseCanvas({
   }
 
   async function stop() {
+    if (!runningRef.current) return;
     runningRef.current = false;
+    capturePlaybackCleanupRef.current?.();
+    capturePlaybackCleanupRef.current = null;
     setRunning(false);
     setStatus("ready");
     const v = videoRef.current;
@@ -2863,6 +2935,8 @@ export default function PoseCanvas({
     }
     onStop?.(summary, { videoBlobs });
   }
+
+  stopCaptureRef.current = stop;
 
   /* ---------------- Render ---------------- */
   return (
