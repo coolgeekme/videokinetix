@@ -17,9 +17,9 @@ does not silently use the pose of a player crossing through the selected box.
 
 ## Test the branch locally (Windows PowerShell)
 
-The frontend and backend from this branch must run together. Pointing the branch
-frontend at `https://visionkinetix.ai` will use the published backend, which does not
-have branch-only tracking endpoints until a backend preview is deployed.
+The tracking-only development server avoids production Mongo, storage, and private
+LLM credentials. The normal app API can remain pointed at `https://visionkinetix.ai`
+while tracking requests go to localhost.
 
 Use Python 3.12 for the tracking backend. From the repository root:
 
@@ -27,18 +27,18 @@ Use Python 3.12 for the tracking backend. From the repository root:
 git switch feature/persistent-athlete-tracking
 cd backend
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn server:app --reload --port 8000
+.\.venv\Scripts\python.exe -m pip install -r requirements-tracking.txt
+.\.venv\Scripts\python.exe -m uvicorn tracking_dev_server:app --reload --port 8000
 ```
 
-The existing backend environment variables, including `MONGO_URL` and `DB_NAME`,
-must be available in `backend/.env`.
+Open `http://localhost:8000/`. Its JSON response must include `"ready": true`.
 
 In a second PowerShell window:
 
 ```powershell
 cd "C:\Users\reggi\Documents\Vision Kinetix\frontend"
-$env:REACT_APP_BACKEND_URL="http://localhost:8000"
+$env:REACT_APP_BACKEND_URL="https://visionkinetix.ai"
+$env:REACT_APP_TRACKING_BACKEND_URL="http://localhost:8000"
 npm.cmd install --legacy-peer-deps
 npm.cmd start
 ```

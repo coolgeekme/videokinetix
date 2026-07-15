@@ -1,6 +1,14 @@
+import axios from "axios";
 import { api } from "./api";
 
 const TRACK_FRAME_WIDTH = 640;
+const trackingBackendUrl = process.env.REACT_APP_TRACKING_BACKEND_URL;
+const trackingApi = trackingBackendUrl
+  ? axios.create({
+      baseURL: `${trackingBackendUrl.replace(/\/$/, "")}/api`,
+      timeout: 15000,
+    })
+  : api;
 
 function canvasBlob(canvas) {
   return new Promise((resolve, reject) => {
@@ -93,7 +101,7 @@ export function poseIndexInsideTrack(poses, track, centerForPose) {
 }
 
 export class EnhancedTrackingClient {
-  constructor(apiClient = api) {
+  constructor(apiClient = trackingApi) {
     this.api = apiClient;
     this.sessionId = null;
     this.canvas = document.createElement("canvas");
@@ -158,4 +166,3 @@ export class EnhancedTrackingClient {
     }
   }
 }
-

@@ -1,0 +1,8 @@
+# Minimal local runtime for testing Supervision/BoT-SORT. This intentionally
+# excludes the production database, storage, and private LLM integration.
+fastapi==0.110.1
+uvicorn==0.25.0
+python-multipart>=0.0.9
+supervision>=0.28,<0.30
+trackers>=2.5,<3
+opencv-python-headless>=4.10,<5
