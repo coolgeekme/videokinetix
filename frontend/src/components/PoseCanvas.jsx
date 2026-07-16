@@ -246,6 +246,7 @@ export default function PoseCanvas({
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
   const captureIdentitySeenRef = useRef(false);
+  const emptyFrameDiagnosticLoggedRef = useRef(false);
   const stopCaptureRef = useRef(null);
   const capturePlaybackCleanupRef = useRef(null);
 
@@ -275,6 +276,13 @@ export default function PoseCanvas({
   const targetTorsoScaleRef = useRef(null);
   const targetSearchPhaseRef = useRef(0);
   const manualUnderwaterLockRef = useRef(false);
+  // A capture rewind seeks the video to a different point in the clip, which
+  // orphans the local pose tracker's IOU/velocity-based track (it's still
+  // anchored at the pre-rewind position). The appearance-based reacquisition
+  // below normally only runs for non-ROI targets; this flag lets it also run
+  // once right after a rewind so ROI-mode targets (swimming, or small/far
+  // athletes) aren't stuck at targetIdx === -1 for the rest of the capture.
+  const awaitingRewindReacquireRef = useRef(false);
   const appearanceCanvasRef = useRef(null);
   const targetVisualTemplateRef = useRef(null);
   const targetVisualCanvasRef = useRef(null);
@@ -721,11 +729,14 @@ export default function PoseCanvas({
       // Edited clips can teleport the selected athlete across the frame. That
       // invalidates every motion/IoU prediction even though their appearance is
       // still present. Rebind only after the same appearance candidate wins two
-      // consecutive full-frame detections.
+      // consecutive full-frame detections. A capture rewind is the same kind
+      // of teleport for ROI-mode targets (swimming, or small/far athletes),
+      // whose local track would otherwise stay orphaned at the pre-rewind
+      // position for the rest of the capture -- see awaitingRewindReacquireRef.
       if (
         targetIdx === -1 &&
         targetTrackIdRef.current != null &&
-        !targetUsesRoiRef.current &&
+        (!targetUsesRoiRef.current || awaitingRewindReacquireRef.current) &&
         poses.length &&
         targetAppearanceGalleryRef.current.length
       ) {
@@ -775,6 +786,7 @@ export default function PoseCanvas({
             );
             selectedEnhancedTrackIdRef.current = reboundEnhanced?.id ?? null;
             targetReacquireRef.current = null;
+            awaitingRewindReacquireRef.current = false;
             lastSeenAtRef.current = Date.now();
           }
         }
@@ -1186,6 +1198,23 @@ export default function PoseCanvas({
           tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
           occluded: true,
         });
+        if (!captureIdentitySeenRef.current && !emptyFrameDiagnosticLoggedRef.current) {
+          // Recording started but never captured one usable landmark frame.
+          // Logged once per capture so a "no reps counted" report has enough
+          // signal (without asking the user to reproduce with devtools open)
+          // to tell whether identity, appearance, or the ROI scan is at fault.
+          emptyFrameDiagnosticLoggedRef.current = true;
+          console.warn("[PoseCanvas] recording has not captured a usable pose yet", {
+            targetIdx,
+            hasSelectedEnhancedTrack: Boolean(selectedEnhancedTrack),
+            targetTrackId: targetTrackIdRef.current,
+            selectedEnhancedTrackId: selectedEnhancedTrackIdRef.current,
+            targetUsesRoi: targetUsesRoiRef.current,
+            awaitingRewindReacquire: awaitingRewindReacquireRef.current,
+            poseCount: poses.length,
+            galleryDescriptors: targetAppearanceGalleryRef.current.length,
+          });
+        }
       }
     },
     [
@@ -1214,6 +1243,7 @@ export default function PoseCanvas({
     targetUsesRoiRef.current = false;
     targetAppearanceGalleryRef.current = [];
     targetReacquireRef.current = null;
+    awaitingRewindReacquireRef.current = false;
     targetTorsoScaleRef.current = null;
     targetSearchPhaseRef.current = 0;
     manualUnderwaterLockRef.current = false;
@@ -2942,6 +2972,7 @@ export default function PoseCanvas({
     targetUsesRoiRef.current = false;
     targetAppearanceGalleryRef.current = [];
     targetReacquireRef.current = null;
+    awaitingRewindReacquireRef.current = false;
     targetTorsoScaleRef.current = null;
     targetSearchPhaseRef.current = 0;
     manualUnderwaterLockRef.current = false;
@@ -3127,6 +3158,18 @@ export default function PoseCanvas({
           lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
           enhancedTracksRef.current = [];
           enhancedTracksUpdatedAtRef.current = 0;
+          // The local pose tracker's IOU/velocity-based track is anchored at
+          // wherever the athlete was before the seek; it can only ever match
+          // the wrong position afterward. Reset it so the frame right after
+          // the rewind starts clean instead of carrying a stale, un-matchable
+          // track that permanently blocks recording (targetIdx never resolves
+          // again for the rest of the capture). targetTrackIdRef is left as-is
+          // -- getTrack() on a reset tracker safely returns undefined -- and
+          // awaitingRewindReacquireRef lets the appearance-based reacquisition
+          // below rebind it even for ROI-mode targets (swimming, small/far
+          // athletes) that have no enhanced/manifest ID to fall back on.
+          poseTrackerRef.current.reset();
+          awaitingRewindReacquireRef.current = true;
           // Manifest IDs cover the entire clip and remain valid after a rewind.
           // Clearing the selected ID here made Start Capture discard the box
           // that the user had just verified during preview playback.
@@ -3146,6 +3189,7 @@ export default function PoseCanvas({
     setTrackingLost(false);
     setPosePending(false);
     captureIdentitySeenRef.current = false;
+    emptyFrameDiagnosticLoggedRef.current = false;
     framesRef.current = [];
     thumbsRef.current = [];
     lastThumbAtRef.current = 0;
