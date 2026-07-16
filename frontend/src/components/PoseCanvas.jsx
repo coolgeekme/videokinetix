@@ -20,6 +20,7 @@ import {
   poseIndexInsideTrack,
   poseMatchesTrack,
 } from "../lib/enhancedTracking";
+import { buildTrackingManifest, lookupManifestTracks } from "../lib/videoTrackingManifest";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 import { getCapturePlaybackPlan } from "@/lib/capturePlayback";
 
@@ -201,6 +202,12 @@ export default function PoseCanvas({
   const enhancedTrackingReadyRef = useRef(false);
   const selectedEnhancedTrackIdRef = useRef(null);
   const [enhancedTrackingState, setEnhancedTrackingState] = useState("loading");
+  // Upload mode only: a whole-clip identity manifest built once, up front, in
+  // place of the live ~140ms-throttled per-frame call. See
+  // src/lib/videoTrackingManifest.js for why this improves lock stability.
+  const trackingManifestRef = useRef(null);
+  const manifestBuildAbortRef = useRef(null);
+  const [manifestStatus, setManifestStatus] = useState("idle");
   const targetTrackIdRef = useRef(null); // persistent identity selected by the user
   const targetUsesRoiRef = useRef(false); // close-up inference for small/far athletes
   const targetAppearanceGalleryRef = useRef([]);
@@ -1082,6 +1089,10 @@ export default function PoseCanvas({
     enhancedTracksRef.current = [];
     enhancedTracksUpdatedAtRef.current = 0;
     selectedEnhancedTrackIdRef.current = null;
+    manifestBuildAbortRef.current?.abort();
+    manifestBuildAbortRef.current = null;
+    trackingManifestRef.current = null;
+    setManifestStatus("idle");
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
     targetAppearanceGalleryRef.current = [];
@@ -1123,6 +1134,48 @@ export default function PoseCanvas({
     setBallCount(0);
     setBallSeen(false);
   }, [videoSrc, mode, sport]);
+
+  /* ---------------- Whole-clip tracking manifest (upload mode only) ----------------
+   * Runs once the delicate video-load/warm-up sequence below has fully
+   * settled (status === "ready"), so seeking for analysis can't race with it.
+   * On any failure this leaves trackingManifestRef null and the live
+   * per-frame path (still present below) keeps working exactly as before. */
+  useEffect(() => {
+    if (mode !== "upload" || status !== "ready") return undefined;
+    if (enhancedTrackingState !== "ready") return undefined;
+    const video = videoRef.current;
+    if (!video || !personDetectorRef.current || !landmarkerRef.current) return undefined;
+    if (trackingManifestRef.current || manifestBuildAbortRef.current) return undefined;
+
+    const controller = new AbortController();
+    manifestBuildAbortRef.current = controller;
+    setManifestStatus("building");
+
+    buildTrackingManifest({
+      video,
+      personDetector: personDetectorRef.current,
+      poseLandmarker: landmarkerRef.current,
+      sport,
+      signal: controller.signal,
+    })
+      .then((manifest) => {
+        if (controller.signal.aborted) return;
+        trackingManifestRef.current = manifest;
+        setManifestStatus(manifest ? "ready" : "unavailable");
+      })
+      .catch((error) => {
+        console.warn(
+          "[PoseCanvas] Whole-clip tracking analysis failed; falling back to live tracking",
+          error
+        );
+        if (!controller.signal.aborted) setManifestStatus("unavailable");
+      })
+      .finally(() => {
+        if (manifestBuildAbortRef.current === controller) manifestBuildAbortRef.current = null;
+      });
+
+    return () => controller.abort();
+  }, [mode, status, enhancedTrackingState, sport]);
 
   /* ---------------- Pose model + camera setup ---------------- */
   useEffect(() => {
@@ -1309,7 +1362,88 @@ export default function PoseCanvas({
             // Person detection runs at a lower cadence than pose estimation.
             // One request at a time preserves frame order in the stateful
             // BoT-SORT session and leaves main-thread budget for motion capture.
-            if (
+            //
+            // This same reconciliation runs from two callers: the live path
+            // below (throttled, async, one network round trip at a time) and
+            // the whole-clip manifest lookup (upload mode, once analysis has
+            // finished) further down -- identical logic either way, just fed
+            // by a different source of tracked boxes.
+            const applyEnhancedTracks = (tracks) => {
+              if (cancelled || !tracks) return;
+              enhancedTrackingFailuresRef.current = 0;
+              enhancedTracksRef.current = tracks;
+              enhancedTracksUpdatedAtRef.current = Date.now();
+              const selected = selectedEnhancedTrackIdRef.current == null
+                ? null
+                : tracks.find(
+                    (track) => track.id === selectedEnhancedTrackIdRef.current
+                  );
+              const localTarget = targetTrackIdRef.current != null
+                ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
+                : null;
+              const gallery = targetAppearanceGalleryRef.current;
+              const scoreIdentityTrack = (track) => {
+                if (!track) return null;
+                const descriptor = sampleTrackAppearance(track);
+                const similarity = gallery.length && descriptor
+                  ? bestAppearanceSimilarity(gallery, descriptor)
+                  : 1;
+                const roi = paddedTrackRoi(track, 0);
+                const distance = localTarget?.center && roi?.center
+                  ? dist2D(localTarget.center, roi.center)
+                  : 0;
+                return { track, similarity, distance, score: similarity * 2.5 - distance * 2 };
+              };
+              const selectedIdentity = scoreIdentityTrack(selected);
+              let identityTrack = selectedIdentity &&
+                (!gallery.length || selectedIdentity.similarity >= 0.34) &&
+                (!localTarget?.center || selectedIdentity.distance <= 0.3)
+                ? selected
+                : null;
+              if (
+                !identityTrack &&
+                localTarget?.center
+              ) {
+                const candidate = tracks
+                  .map(scoreIdentityTrack)
+                  .filter(
+                    (item) =>
+                      item && item.distance <= 0.34 &&
+                      (!gallery.length || item.similarity >= 0.38)
+                  )
+                  .sort((a, b) => b.score - a.score)[0];
+                identityTrack = candidate?.track || null;
+                if (identityTrack) {
+                  // A fast sprint can make BoT-SORT issue a new ID even
+                  // though the appearance-verified local pose never left.
+                  // Re-bind through both local motion and the locked jersey
+                  // appearance, rather than accepting any crossing box.
+                  selectedEnhancedTrackIdRef.current = identityTrack.id;
+                }
+              }
+              const roi = paddedTrackRoi(
+                identityTrack,
+                TRACKED_ROI_PADDING
+              );
+              if (roi && targetUsesRoiRef.current) {
+                const localTargetFresh = localTarget?.updatedAt != null &&
+                  performance.now() - localTarget.updatedAt < 220;
+                if (!localTargetFresh) targetAnchorRef.current = roi.center;
+              }
+              if (v.paused && !runningRef.current) {
+                drawResults({ landmarks: lastPosesRef.current });
+              }
+            };
+
+            if (trackingManifestRef.current) {
+              // Upload mode with a finished manifest: every sampled
+              // timestamp's identities were already resolved offline, at the
+              // clip's real cadence, with no network round trip in the loop.
+              // Look them up directly instead of the throttled live call.
+              applyEnhancedTracks(
+                lookupManifestTracks(trackingManifestRef.current, v.currentTime) || []
+              );
+            } else if (
               enhancedTrackingReadyRef.current &&
               personDetectorRef.current &&
               enhancedClientRef.current &&
@@ -1329,72 +1463,7 @@ export default function PoseCanvas({
                   lastPosesRef.current,
                   { sport }
                 )
-                .then((tracks) => {
-                  if (cancelled || !tracks) return;
-                  enhancedTrackingFailuresRef.current = 0;
-                  enhancedTracksRef.current = tracks;
-                  enhancedTracksUpdatedAtRef.current = Date.now();
-                  const selected = selectedEnhancedTrackIdRef.current == null
-                    ? null
-                    : tracks.find(
-                        (track) => track.id === selectedEnhancedTrackIdRef.current
-                      );
-                  const localTarget = targetTrackIdRef.current != null
-                    ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
-                    : null;
-                  const gallery = targetAppearanceGalleryRef.current;
-                  const scoreIdentityTrack = (track) => {
-                    if (!track) return null;
-                    const descriptor = sampleTrackAppearance(track);
-                    const similarity = gallery.length && descriptor
-                      ? bestAppearanceSimilarity(gallery, descriptor)
-                      : 1;
-                    const roi = paddedTrackRoi(track, 0);
-                    const distance = localTarget?.center && roi?.center
-                      ? dist2D(localTarget.center, roi.center)
-                      : 0;
-                    return { track, similarity, distance, score: similarity * 2.5 - distance * 2 };
-                  };
-                  const selectedIdentity = scoreIdentityTrack(selected);
-                  let identityTrack = selectedIdentity &&
-                    (!gallery.length || selectedIdentity.similarity >= 0.34) &&
-                    (!localTarget?.center || selectedIdentity.distance <= 0.3)
-                    ? selected
-                    : null;
-                  if (
-                    !identityTrack &&
-                    localTarget?.center
-                  ) {
-                    const candidate = tracks
-                      .map(scoreIdentityTrack)
-                      .filter(
-                        (item) =>
-                          item && item.distance <= 0.34 &&
-                          (!gallery.length || item.similarity >= 0.38)
-                      )
-                      .sort((a, b) => b.score - a.score)[0];
-                    identityTrack = candidate?.track || null;
-                    if (identityTrack) {
-                      // A fast sprint can make BoT-SORT issue a new ID even
-                      // though the appearance-verified local pose never left.
-                      // Re-bind through both local motion and the locked jersey
-                      // appearance, rather than accepting any crossing box.
-                      selectedEnhancedTrackIdRef.current = identityTrack.id;
-                    }
-                  }
-                  const roi = paddedTrackRoi(
-                    identityTrack,
-                    TRACKED_ROI_PADDING
-                  );
-                  if (roi && targetUsesRoiRef.current) {
-                    const localTargetFresh = localTarget?.updatedAt != null &&
-                      performance.now() - localTarget.updatedAt < 220;
-                    if (!localTargetFresh) targetAnchorRef.current = roi.center;
-                  }
-                  if (v.paused && !runningRef.current) {
-                    drawResults({ landmarks: lastPosesRef.current });
-                  }
-                })
+                .then(applyEnhancedTracks)
                 .catch((trackingError) => {
                   enhancedTrackingFailuresRef.current += 1;
                   console.warn("[PoseCanvas] enhanced tracking frame failed", trackingError);
@@ -3157,11 +3226,15 @@ export default function PoseCanvas({
             }`}
           />
           <span className="text-[10px] font-display uppercase tracking-widest font-bold">
-            {enhancedTrackingState === "ready"
-              ? "BoT-SORT identity"
-              : enhancedTrackingState === "fallback"
-                ? "Local pose fallback"
-                : "Starting identity tracker"}
+            {mode === "upload" && manifestStatus === "building"
+              ? "Analyzing full clip"
+              : mode === "upload" && manifestStatus === "ready"
+                ? "Full-clip identity lock"
+                : enhancedTrackingState === "ready"
+                  ? "BoT-SORT identity"
+                  : enhancedTrackingState === "fallback"
+                    ? "Local pose fallback"
+                    : "Starting identity tracker"}
           </span>
         </div>
 

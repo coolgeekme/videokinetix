@@ -40,11 +40,33 @@ BOT_SORT_OPTIONS = {
     "enable_cmc": True,
 }
 
+# Live capture only gets one detection roughly every 140ms (browser main-thread
+# budget + a network round trip), so a moving athlete can cross most of their
+# own box between samples -- BOT_SORT_OPTIONS' loose IOU gates exist to
+# tolerate that. The batch endpoint instead receives every frame the browser
+# ever decoded, collected without a real-time deadline, at whatever cadence
+# the source video actually plays at (typically 24-30fps). Motion between
+# consecutive samples shrinks proportionally, so association can afford to be
+# stricter -- which matters because basketball players and swimmers in
+# adjacent lanes regularly pass close enough for the loose live thresholds to
+# swap identities.
+BOT_SORT_BATCH_OPTIONS = {
+    **BOT_SORT_OPTIONS,
+    "frame_rate": 24.0,
+    "minimum_iou_threshold_first_assoc": 0.25,
+    "minimum_iou_threshold_second_assoc": 0.35,
+    "minimum_iou_threshold_unconfirmed_assoc": 0.3,
+}
 
-def create_botsort_tracker(tracker_class: type[Any]) -> Any:
-    """Create a tracker tuned to the browser detector's real cadence."""
+MAX_BATCH_FRAMES = 2400  # ~100s at 24fps; bounds one-shot request cost
 
-    return tracker_class(**BOT_SORT_OPTIONS)
+
+def create_botsort_tracker(
+    tracker_class: type[Any], options: dict[str, Any] = BOT_SORT_OPTIONS
+) -> Any:
+    """Create a tracker tuned to the caller's real sampling cadence."""
+
+    return tracker_class(**options)
 
 
 @dataclass
@@ -91,6 +113,7 @@ class TrackingSessionManager:
         self,
         *,
         tracker_factory: Callable[[], Any] | None = None,
+        batch_tracker_factory: Callable[[], Any] | None = None,
         detections_factory: Callable[[list[list[float]], list[float]], Any] | None = None,
         frame_decoder: Callable[[bytes], Any] | None = None,
         ttl_seconds: float = 20 * 60,
@@ -103,6 +126,7 @@ class TrackingSessionManager:
 
         if tracker_factory and detections_factory:
             self._tracker_factory = tracker_factory
+            self._batch_tracker_factory = batch_tracker_factory or tracker_factory
             self._detections_factory = detections_factory
             self._frame_decoder = frame_decoder
             return
@@ -118,6 +142,11 @@ class TrackingSessionManager:
             # updates. BoT-SORT's 30 FPS defaults were too strict here, causing
             # a moving athlete to receive a new ID almost immediately.
             self._tracker_factory = lambda: create_botsort_tracker(BoTSORTTracker)
+            # The batch endpoint gets every frame the browser decoded, sampled
+            # without a live real-time deadline -- see BOT_SORT_BATCH_OPTIONS.
+            self._batch_tracker_factory = lambda: create_botsort_tracker(
+                BoTSORTTracker, BOT_SORT_BATCH_OPTIONS
+            )
 
             def build_detections(boxes: list[list[float]], confidence: list[float]) -> Any:
                 xyxy = np.asarray(boxes, dtype=np.float32).reshape((-1, 4))
@@ -135,6 +164,7 @@ class TrackingSessionManager:
             self._frame_decoder = decode_frame
         except Exception as exc:  # optional dependency boundary
             self._tracker_factory = None
+            self._batch_tracker_factory = None
             self._detections_factory = None
             self._frame_decoder = None
             self._load_error = f"{type(exc).__name__}: {exc}"
@@ -201,31 +231,24 @@ class TrackingSessionManager:
             return None
         return self._frame_decoder(data)
 
-    def update_session(
+    def _update_tracker(
         self,
-        user_id: str,
-        session_id: str,
+        tracker: Any,
         raw_detections: Iterable[dict[str, Any]],
         *,
         frame: Any = None,
         timestamp: float | None = None,
     ) -> list[dict[str, Any]]:
-        self._require_ready()
-        session = self._get_session(user_id, session_id)
         detections = validate_detections(raw_detections)
         boxes = [item["xyxy"] for item in detections]
         confidence = [item["confidence"] for item in detections]
         sv_detections = self._detections_factory(boxes, confidence)
 
         try:
-            tracked = session.tracker.update(
-                sv_detections,
-                frame=frame,
-                timestamp=timestamp,
-            )
+            tracked = tracker.update(sv_detections, frame=frame, timestamp=timestamp)
         except TypeError:
             # Compatibility with trackers 2.x releases before timestamp support.
-            tracked = session.tracker.update(sv_detections, frame=frame)
+            tracked = tracker.update(sv_detections, frame=frame)
 
         tracked_boxes = getattr(tracked, "xyxy", [])
         tracked_scores = getattr(tracked, "confidence", None)
@@ -245,3 +268,57 @@ class TrackingSessionManager:
                 }
             )
         return output
+
+    def update_session(
+        self,
+        user_id: str,
+        session_id: str,
+        raw_detections: Iterable[dict[str, Any]],
+        *,
+        frame: Any = None,
+        timestamp: float | None = None,
+    ) -> list[dict[str, Any]]:
+        self._require_ready()
+        session = self._get_session(user_id, session_id)
+        return self._update_tracker(
+            session.tracker, raw_detections, frame=frame, timestamp=timestamp
+        )
+
+    def run_batch(
+        self, frames: Iterable[dict[str, Any]]
+    ) -> list[list[dict[str, Any]]]:
+        """Resolve identities for a whole clip in one pass, no real-time deadline.
+
+        Unlike ``update_session``, this owns no persistent state: every call
+        gets a fresh tracker tuned for dense, evenly-sampled input (see
+        ``BOT_SORT_BATCH_OPTIONS``) so results are independent of any live
+        session the same user may also have open.
+        """
+
+        self._require_ready()
+        frame_list = list(frames)
+        if not frame_list:
+            raise ValueError("frames must be a non-empty list")
+        if len(frame_list) > MAX_BATCH_FRAMES:
+            raise ValueError(f"At most {MAX_BATCH_FRAMES} frames are allowed per batch")
+
+        tracker = self._batch_tracker_factory()
+        results: list[list[dict[str, Any]]] = []
+        for index, entry in enumerate(frame_list):
+            if not isinstance(entry, dict):
+                raise ValueError(f"Frame {index} must be an object")
+            raw_detections = entry.get("detections")
+            if not isinstance(raw_detections, list):
+                raise ValueError(f"Frame {index} must include a detections list")
+            timestamp = entry.get("timestamp")
+            if timestamp is not None:
+                try:
+                    timestamp = float(timestamp)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"Frame {index} timestamp must be a number") from exc
+                if not math.isfinite(timestamp):
+                    raise ValueError(f"Frame {index} timestamp must be finite")
+            results.append(
+                self._update_tracker(tracker, raw_detections, timestamp=timestamp)
+            )
+        return results

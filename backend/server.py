@@ -945,6 +945,37 @@ async def delete_tracking_session(
     return {"deleted": True, "session_id": session_id}
 
 
+class TrackingBatchFrame(BaseModel):
+    timestamp: Optional[float] = None
+    detections: list[dict]
+
+
+class TrackingBatchReq(BaseModel):
+    frames: list[TrackingBatchFrame]
+
+
+@api.post("/tracking/batch")
+async def run_tracking_batch(
+    payload: TrackingBatchReq,
+    user_id: str = Depends(get_current_user_id),
+):
+    # Resolves identities for an entire uploaded clip in one pass instead of
+    # streaming frames live. The browser collects every frame up front with no
+    # real-time deadline, so association runs at the source video's real
+    # cadence rather than the ~140ms-per-request rate a live session sees --
+    # see BOT_SORT_BATCH_OPTIONS in tracking_service.py for why that matters.
+    _ = user_id
+    try:
+        results = tracking_manager.run_batch(
+            [frame.model_dump() for frame in payload.frames]
+        )
+    except TrackingUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"frames": results}
+
+
 # ---------- Health ----------
 @api.get("/")
 async def root():

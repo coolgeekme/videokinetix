@@ -4,6 +4,7 @@ import json
 from typing import Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 
 from tracking_service import (
@@ -11,6 +12,15 @@ from tracking_service import (
     TrackingSessionNotFoundError,
     TrackingUnavailableError,
 )
+
+
+class TrackingBatchFrame(BaseModel):
+    timestamp: Optional[float] = None
+    detections: list[dict]
+
+
+class TrackingBatchReq(BaseModel):
+    frames: list[TrackingBatchFrame]
 
 
 app = FastAPI(title="Vision Kinetix Local Tracking API")
@@ -93,3 +103,16 @@ async def delete_tracking_session(session_id: str):
     if not manager.delete_session(LOCAL_USER_ID, session_id):
         raise HTTPException(404, "Tracking session not found")
     return {"deleted": True, "session_id": session_id}
+
+
+@app.post("/api/tracking/batch")
+async def run_tracking_batch(payload: TrackingBatchReq):
+    try:
+        results = manager.run_batch(
+            [frame.model_dump() for frame in payload.frames]
+        )
+    except TrackingUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"frames": results}
