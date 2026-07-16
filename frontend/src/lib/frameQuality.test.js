@@ -47,6 +47,22 @@ describe("assessFrameQuality", () => {
     expect(result.issues.some((issue) => issue.includes("perpendicular side view"))).toBe(false);
   });
 
+  test("accepts swimming arm motion when hips are hidden", () => {
+    const pose = fullBodyPose(0.35);
+    pose[23].visibility = 0.03;
+    pose[24].visibility = 0.03;
+    pose[27].visibility = 0.03;
+    pose[28].visibility = 0.03;
+
+    const result = assessFrameQuality([pose], {
+      sport: "swimming",
+      cameraAspect: 0.56,
+    });
+
+    expect(result.issues.some((issue) => issue.includes("hips"))).toBe(false);
+    expect(result.issues.some((issue) => issue.includes("Arm pose obscured"))).toBe(false);
+  });
+
   test("asks an obscured underwater swimmer to approach before analysis", () => {
     const pose = fullBodyPose(0.15).map((point) => ({
       ...point,

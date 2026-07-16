@@ -46,7 +46,7 @@ export default function Capture() {
   const [athleteId, setAthleteId] = useState(params.get("athlete") || null);
   const [sports, setSports] = useState([]);
   const [sport, setSport] = useState(params.get("sport") || null);
-  const [mode, setMode] = useState("live");
+  const [mode, setMode] = useState("upload");
   const [matchMode, setMatchMode] = useState(false); // pickleball doubles only
   const [videoSrc, setVideoSrc] = useState(null);
   const [notes, setNotes] = useState("");

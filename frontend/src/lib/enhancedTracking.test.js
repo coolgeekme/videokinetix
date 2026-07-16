@@ -8,6 +8,7 @@ import {
   poseIndexInsideTrack,
   poseMatchesTrack,
   removeUnderwaterReflections,
+  removeUnderwaterReflectionPoses,
 } from "./enhancedTracking";
 
 describe("enhanced athlete tracking helpers", () => {
@@ -179,5 +180,33 @@ describe("enhanced athlete tracking helpers", () => {
     )).toEqual([
       swimmer,
     ]);
+  });
+
+  test("removes reflection skeletons before motion capture", () => {
+    const makePose = (centerY) => Array.from({ length: 33 }, (_, index) => ({
+      x: 0.5 + ((index % 2) ? 0.02 : -0.02),
+      y: centerY + ((index % 3) - 1) * 0.04,
+      visibility: 0.9,
+    }));
+    const reflectionPose = makePose(0.18);
+    const swimmerPose = makePose(0.68);
+
+    expect(removeUnderwaterReflectionPoses([reflectionPose, swimmerPose])).toEqual([
+      swimmerPose,
+    ]);
+  });
+
+  test("keeps a distant real swimmer near the waterline", () => {
+    const makePose = (centerY) => Array.from({ length: 33 }, (_, index) => ({
+      x: 0.5 + ((index % 2) ? 0.02 : -0.02),
+      y: centerY + ((index % 3) - 1) * 0.025,
+      visibility: 0.9,
+    }));
+    const surfaceReflection = makePose(0.29);
+    const distantSwimmer = makePose(0.43);
+
+    expect(
+      removeUnderwaterReflectionPoses([surfaceReflection, distantSwimmer])
+    ).toEqual([distantSwimmer]);
   });
 });

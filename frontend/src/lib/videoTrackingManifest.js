@@ -1,8 +1,10 @@
 import {
   mergePersonDetections,
   normalizeTrackedBoxes,
+  poseIndexInsideTrack,
   poseDetectionsFromLandmarks,
   removeUnderwaterReflections,
+  removeUnderwaterReflectionPoses,
 } from "./enhancedTracking";
 import { api } from "./api";
 import axios from "axios";
@@ -13,6 +15,105 @@ export const MANIFEST_MAX_FRAMES = 2400;
 // athlete -- the live path's 7fps cadence is what forced BoT-SORT's loose
 // association thresholds in the first place (see BOT_SORT_BATCH_OPTIONS).
 export const MANIFEST_FRAME_STEP_SECONDS = 1 / 15;
+export const UNDERWATER_POSE_CROP_TOP = 0.32;
+
+function detectionGeometry(detection, width, height) {
+  const [x1, y1, x2, y2] = detection.xyxy;
+  const boxWidth = Math.max(1, x2 - x1) / width;
+  const boxHeight = Math.max(1, y2 - y1) / height;
+  return {
+    center: {
+      x: (x1 + x2) / 2 / width,
+      y: (y1 + y2) / 2 / height,
+    },
+    scale: Math.sqrt(boxWidth * boxHeight),
+  };
+}
+
+/**
+ * A fixed underwater camera normally contains one selected lane/swimmer. The
+ * browser can associate its already reflection-filtered boxes locally instead
+ * of waiting for a second server-side batch pass. Long gaps are tolerated
+ * because a distant swimmer may disappear into bubbles before approaching.
+ */
+export function linkSwimmingDetections(frames, width, height, maxGapFrames = 75) {
+  const active = new Map();
+  let nextId = 1;
+  return (frames || []).map((frame, frameIndex) => {
+    const detections = (frame.detections || [])
+      .map((detection) => ({
+        detection,
+        geometry: detectionGeometry(detection, width, height),
+      }))
+      .sort(
+        (a, b) =>
+          (b.detection.confidence || 0) - (a.detection.confidence || 0)
+      );
+    const candidates = [];
+    for (const [trackId, track] of active) {
+      const gap = frameIndex - track.lastFrame;
+      if (gap > maxGapFrames) {
+        active.delete(trackId);
+        continue;
+      }
+      detections.forEach((item, detectionIndex) => {
+        const distance = Math.hypot(
+          item.geometry.center.x - track.center.x,
+          item.geometry.center.y - track.center.y
+        );
+        const gate = Math.min(
+          0.58,
+          0.1 + gap * 0.012 + Math.max(track.scale, item.geometry.scale) * 0.9
+        );
+        if (distance > gate) return;
+        const scaleCost = Math.min(
+          1,
+          Math.abs(
+            Math.log(
+              Math.max(item.geometry.scale, 0.001) /
+                Math.max(track.scale, 0.001)
+            )
+          )
+        );
+        candidates.push({
+          trackId,
+          detectionIndex,
+          cost: distance / Math.max(gate, 0.001) + scaleCost * 0.15,
+        });
+      });
+    }
+    candidates.sort((a, b) => a.cost - b.cost);
+    const assignedTracks = new Set();
+    const assignedDetections = new Map();
+    for (const candidate of candidates) {
+      if (
+        assignedTracks.has(candidate.trackId) ||
+        assignedDetections.has(candidate.detectionIndex)
+      ) continue;
+      assignedTracks.add(candidate.trackId);
+      assignedDetections.set(candidate.detectionIndex, candidate.trackId);
+    }
+
+    return detections.map((item, detectionIndex) => {
+      let trackId = assignedDetections.get(detectionIndex);
+      if (trackId == null) {
+        trackId = nextId;
+        nextId += 1;
+      }
+      active.set(trackId, {
+        center: item.geometry.center,
+        scale: item.geometry.scale,
+        lastFrame: frameIndex,
+      });
+      return {
+        confirmed: true,
+        tracker_id: trackId,
+        xyxy: item.detection.xyxy,
+        confidence: item.detection.confidence ?? 0,
+      };
+    });
+  });
+}
 
 const trackingBackendUrl = process.env.REACT_APP_TRACKING_BACKEND_URL;
 const trackingApi = trackingBackendUrl
@@ -73,10 +174,14 @@ export async function captureManifestFrames({
   timestamps,
   onProgress,
   signal,
+  nextPoseTimestamp,
+  nextPersonTimestamp,
+  underwaterPoseCanvas,
 }) {
   const ctx = canvas.getContext("2d");
   const frames = [];
   let poseTimestampMs = 0;
+  let personTimestampMs = 0;
   for (let index = 0; index < timestamps.length; index += 1) {
     if (signal?.aborted) break;
     const timestamp = timestamps[index];
@@ -86,10 +191,43 @@ export async function captureManifestFrames({
     // MediaPipe's VIDEO running mode requires strictly increasing timestamps;
     // the real video timestamp isn't usable here because seeking can revisit
     // times out of order relative to the previous call.
-    poseTimestampMs += 1;
-    const poseResult = poseLandmarker.detectForVideo(canvas, poseTimestampMs);
-    const poses = poseResult?.landmarks || [];
-    const detectionResult = personDetector.detectForVideo(canvas, poseTimestampMs);
+    poseTimestampMs = nextPoseTimestamp?.() ?? poseTimestampMs + 1;
+    personTimestampMs = nextPersonTimestamp?.() ?? personTimestampMs + 1;
+    const detectionResult = personDetector.detectForVideo(canvas, personTimestampMs);
+
+    let poseInput = canvas;
+    let remapUnderwaterPose = false;
+    if (sport === "swimming" && underwaterPoseCanvas) {
+      underwaterPoseCanvas.width = canvas.width;
+      underwaterPoseCanvas.height = canvas.height;
+      const poseCtx = underwaterPoseCanvas.getContext("2d");
+      const sourceTop = Math.round(video.videoHeight * UNDERWATER_POSE_CROP_TOP);
+      const sourceHeight = Math.max(1, video.videoHeight - sourceTop);
+      poseCtx.drawImage(
+        video,
+        0,
+        sourceTop,
+        video.videoWidth,
+        sourceHeight,
+        0,
+        0,
+        underwaterPoseCanvas.width,
+        underwaterPoseCanvas.height
+      );
+      poseInput = underwaterPoseCanvas;
+      remapUnderwaterPose = true;
+    }
+    const poseResult = poseLandmarker.detectForVideo(poseInput, poseTimestampMs);
+    let poses = poseResult?.landmarks || [];
+    if (remapUnderwaterPose) {
+      const cropHeight = 1 - UNDERWATER_POSE_CROP_TOP;
+      poses = poses.map((pose) =>
+        pose.map((landmark) => ({
+          ...landmark,
+          y: UNDERWATER_POSE_CROP_TOP + landmark.y * cropHeight,
+        }))
+      );
+    }
 
     let detectorDetections = (detectionResult?.detections || []).map((detection) => {
       const box = detection.boundingBox;
@@ -103,14 +241,20 @@ export async function captureManifestFrames({
         confidence: detection.categories?.[0]?.score ?? 0,
       };
     });
-    let poseDetections = poseDetectionsFromLandmarks(poses, canvas.width, canvas.height);
-    const underwaterApproach = sport === "swimming" && canvas.height > canvas.width;
+    const underwaterApproach = sport === "swimming";
     if (underwaterApproach) {
       detectorDetections = removeUnderwaterReflections(detectorDetections, canvas.height);
+      poses = removeUnderwaterReflectionPoses(poses);
+    }
+    let poseDetections = poseDetectionsFromLandmarks(poses, canvas.width, canvas.height);
+    if (underwaterApproach) {
       poseDetections = removeUnderwaterReflections(poseDetections, canvas.height);
     }
     const detections = mergePersonDetections(detectorDetections, poseDetections);
-    frames.push({ timestamp, detections });
+    // Keep the pose landmarks captured during the offline pass. Playback can
+    // reuse these exact samples for both the visible skeleton and rep analysis
+    // instead of running a second, expensive MediaPipe pass in real time.
+    frames.push({ timestamp, detections, poses });
     onProgress?.((index + 1) / timestamps.length);
   }
   return frames;
@@ -133,6 +277,8 @@ export async function buildTrackingManifest({
   sport,
   onProgress,
   signal,
+  nextPoseTimestamp,
+  nextPersonTimestamp,
   apiClient = trackingApi,
   frameWidth = 640,
   canvasFactory = () => document.createElement("canvas"),
@@ -147,6 +293,11 @@ export async function buildTrackingManifest({
   const canvas = canvasFactory();
   canvas.width = width;
   canvas.height = height;
+  const underwaterPoseCanvas = sport === "swimming" ? canvasFactory() : null;
+  if (underwaterPoseCanvas) {
+    underwaterPoseCanvas.width = width;
+    underwaterPoseCanvas.height = height;
+  }
 
   const wasPaused = video.paused;
   const originalTime = video.currentTime;
@@ -161,8 +312,11 @@ export async function buildTrackingManifest({
     poseLandmarker,
     sport,
     timestamps,
-    onProgress,
+    onProgress: (progress) => onProgress?.(progress * 0.96),
     signal,
+    nextPoseTimestamp,
+    nextPersonTimestamp,
+    underwaterPoseCanvas,
   });
 
   try {
@@ -174,22 +328,29 @@ export async function buildTrackingManifest({
 
   if (signal?.aborted || !frames.length) return null;
 
-  const response = await apiClient.post("/tracking/batch", {
-    frames: frames.map((frame) => ({
-      timestamp: frame.timestamp,
-      detections: frame.detections,
-    })),
-  });
-  const perFrameTracks = response.data?.frames || [];
+  let perFrameTracks;
+  if (sport === "swimming") {
+    perFrameTracks = linkSwimmingDetections(frames, width, height);
+  } else {
+    const response = await apiClient.post("/tracking/batch", {
+      frames: frames.map((frame) => ({
+        timestamp: frame.timestamp,
+        detections: frame.detections,
+      })),
+    });
+    perFrameTracks = response.data?.frames || [];
+  }
+  onProgress?.(1);
 
   return frames.map((frame, index) => ({
     timestamp: frame.timestamp,
     tracks: normalizeTrackedBoxes(perFrameTracks[index], width, height),
+    poses: frame.poses,
   }));
 }
 
 /** Nearest-sample lookup so playback can query the manifest by video time. */
-export function lookupManifestTracks(manifest, videoTimeSeconds) {
+export function lookupManifestFrame(manifest, videoTimeSeconds) {
   if (!manifest?.length) return null;
   let lo = 0;
   let hi = manifest.length - 1;
@@ -205,8 +366,30 @@ export function lookupManifestTracks(manifest, videoTimeSeconds) {
       Math.abs(prev.timestamp - videoTimeSeconds) <=
       Math.abs(current.timestamp - videoTimeSeconds)
     ) {
-      return prev.tracks;
+      return prev;
     }
   }
-  return manifest[lo].tracks;
+  return manifest[lo];
+}
+
+export function lookupManifestTracks(manifest, videoTimeSeconds) {
+  return lookupManifestFrame(manifest, videoTimeSeconds)?.tracks ?? null;
+}
+
+export function manifestHasPoseForTrack(
+  frame,
+  trackId,
+  centerForPose,
+  poseMatchOptions = {}
+) {
+  if (!frame?.poses?.length) return false;
+  if (trackId == null) return true;
+  const track = (frame.tracks || []).find((candidate) => candidate.id === trackId);
+  if (!track || typeof centerForPose !== "function") return false;
+  return poseIndexInsideTrack(
+    frame.poses,
+    track,
+    centerForPose,
+    poseMatchOptions
+  ) >= 0;
 }

@@ -109,15 +109,43 @@ export function removeUnderwaterReflections(detections, frameHeight) {
   return (detections || []).filter((detection) => {
     const [, y1, , y2] = detection.xyxy;
     const centerY = (y1 + y2) / 2;
+    const startsAtSurface =
+      y1 < frameHeight * 0.25 &&
+      centerY < frameHeight * 0.5 &&
+      y2 < frameHeight * 0.65;
     // In this capture geometry the swimmer approaches through the lower half
     // while the false "people" are water-surface reflections above them.
-    return centerY >= frameHeight * 0.48 || y2 >= frameHeight * 0.72;
+    return !startsAtSurface &&
+      (centerY >= frameHeight * 0.38 || y2 >= frameHeight * 0.62);
   });
 }
 
-export function poseMatchesTrack(pose, track) {
+export function removeUnderwaterReflectionPoses(poses) {
+  return (poses || []).filter((pose) => {
+    const ys = POSE_BOX_LANDMARKS
+      .map((index) => pose?.[index])
+      .filter(
+        (point) =>
+          point &&
+          Number.isFinite(point.y) &&
+          (point.visibility == null || point.visibility >= 0.15)
+      )
+      .map((point) => point.y);
+    if (ys.length < 3) return false;
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const centerY = (minY + maxY) / 2;
+    const startsAtSurface = minY < 0.25 && centerY < 0.5 && maxY < 0.65;
+    return !startsAtSurface && (centerY >= 0.38 || maxY >= 0.62);
+  });
+}
+
+export function poseMatchesTrack(pose, track, { allowUpperBody = false } = {}) {
   if (!track || !Array.isArray(pose)) return false;
-  const core = [11, 12, 23, 24]
+  const coreIndices = allowUpperBody
+    ? [11, 12, 13, 14, 15, 16, 23, 24]
+    : [11, 12, 23, 24];
+  const core = coreIndices
     .map((index) => pose[index])
     .filter(
       (point) =>
@@ -204,7 +232,12 @@ export function paddedTrackRoi(track, padding = 0.16) {
   };
 }
 
-export function poseIndexInsideTrack(poses, track, centerForPose) {
+export function poseIndexInsideTrack(
+  poses,
+  track,
+  centerForPose,
+  poseMatchOptions = {}
+) {
   if (!track) return -1;
   const center = {
     x: (track.x1 + track.x2) / 2,
@@ -215,7 +248,10 @@ export function poseIndexInsideTrack(poses, track, centerForPose) {
   (poses || []).forEach((pose, index) => {
     const poseCenter = centerForPose(pose);
     if (!poseCenter) return;
-    if (Array.isArray(pose) && !poseMatchesTrack(pose, track)) return;
+    if (
+      Array.isArray(pose) &&
+      !poseMatchesTrack(pose, track, poseMatchOptions)
+    ) return;
     const marginX = Math.max(0.015, (track.x2 - track.x1) * 0.12);
     const marginY = Math.max(0.02, (track.y2 - track.y1) * 0.08);
     if (
@@ -289,7 +325,7 @@ export class EnhancedTrackingClient {
         };
       });
       let poseDetections = poseDetectionsFromLandmarks(poses, width, height);
-      const underwaterApproach = options.sport === "swimming" && height > width;
+      const underwaterApproach = options.sport === "swimming";
       if (underwaterApproach) {
         detectorDetections = removeUnderwaterReflections(detectorDetections, height);
         poseDetections = removeUnderwaterReflections(poseDetections, height);

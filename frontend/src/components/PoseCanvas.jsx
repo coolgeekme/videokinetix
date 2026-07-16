@@ -19,10 +19,21 @@ import {
   paddedTrackRoi,
   poseIndexInsideTrack,
   poseMatchesTrack,
+  removeUnderwaterReflectionPoses,
 } from "../lib/enhancedTracking";
-import { buildTrackingManifest, lookupManifestTracks } from "../lib/videoTrackingManifest";
+import {
+  buildTrackingManifest,
+  lookupManifestFrame,
+  manifestHasPoseForTrack,
+} from "../lib/videoTrackingManifest";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 import { getCapturePlaybackPlan } from "@/lib/capturePlayback";
+import {
+  hasUsableSwimmingUpperBody,
+  swimmingLandmarkVisible,
+  swimmingUpperBodyAnchor,
+} from "@/lib/swimmingPose";
+import { mapSwimmingCropPoses } from "@/lib/swimmingPoseCrop";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
 const POSE_CONNECTIONS = [
@@ -71,6 +82,38 @@ async function loadPoseLandmarker() {
     return landmarker;
   })();
   return landmarkerLoaderPromise;
+}
+
+let swimmingImageLandmarkerLoaderPromise = null;
+async function loadSwimmingImageLandmarker() {
+  if (swimmingImageLandmarkerLoaderPromise) {
+    return swimmingImageLandmarkerLoaderPromise;
+  }
+  swimmingImageLandmarkerLoaderPromise = (async () => {
+    const mod = await import(
+      /* webpackIgnore: true */ "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/+esm"
+    );
+    const { PoseLandmarker, FilesetResolver } = mod;
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.20/wasm"
+    );
+    return PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:
+          "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
+        delegate: "GPU",
+      },
+      // Swimming is intentionally detected as a fresh image inside the
+      // selected athlete box. VIDEO mode carries a hip-centred ROI between
+      // frames and loses head-on swimmers as soon as their hips disappear.
+      runningMode: "IMAGE",
+      numPoses: 1,
+      minPoseDetectionConfidence: 0.12,
+      minPosePresenceConfidence: 0.12,
+      minTrackingConfidence: 0.12,
+    });
+  })();
+  return swimmingImageLandmarkerLoaderPromise;
 }
 
 let ballDetectorLoaderPromise = null;
@@ -148,10 +191,18 @@ export default function PoseCanvas({
   trimEnd = null,
   saveVideo = false,
 }) {
+  const centerForPose = useCallback(
+    (pose) => sport === "swimming" ? swimmingUpperBodyAnchor(pose) : hipCenter(pose),
+    [sport]
+  );
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
   const landmarkerRef = useRef(null);
+  const swimmingImageLandmarkerRef = useRef(null);
+  const swimmingPoseCropCanvasRef = useRef(null);
+  const swimmingRotatedCropCanvasRef = useRef(null);
+  const swimmingRotationRef = useRef("clockwise");
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   // Frame-throttle: video plays at ~30fps native but rAF fires at 60fps. Running
@@ -166,12 +217,19 @@ export default function PoseCanvas({
   const lastPersonTrackTimestampRef = useRef(0);
   const enhancedTrackingFailuresRef = useRef(0);
 
-  function nextPoseTimestamp() {
+  const nextPoseTimestamp = useCallback(() => {
     const now = performance.now();
     const next = Math.max(now, lastPoseTimestampRef.current + 0.01);
     lastPoseTimestampRef.current = next;
     return next;
-  }
+  }, []);
+
+  const nextPersonTrackTimestamp = useCallback(() => {
+    const now = performance.now();
+    const next = Math.max(now, lastPersonTrackTimestampRef.current + 0.01);
+    lastPersonTrackTimestampRef.current = next;
+    return next;
+  }, []);
 
   // Video recording (Phase C) — only used when saveVideo === true
   const compositeCanvasRef = useRef(null);
@@ -187,6 +245,7 @@ export default function PoseCanvas({
   const lastThumbAtRef = useRef(0);
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
+  const captureIdentitySeenRef = useRef(false);
   const stopCaptureRef = useRef(null);
   const capturePlaybackCleanupRef = useRef(null);
 
@@ -208,6 +267,7 @@ export default function PoseCanvas({
   const trackingManifestRef = useRef(null);
   const manifestBuildAbortRef = useRef(null);
   const [manifestStatus, setManifestStatus] = useState("idle");
+  const [manifestProgress, setManifestProgress] = useState(0);
   const targetTrackIdRef = useRef(null); // persistent identity selected by the user
   const targetUsesRoiRef = useRef(false); // close-up inference for small/far athletes
   const targetAppearanceGalleryRef = useRef([]);
@@ -221,16 +281,20 @@ export default function PoseCanvas({
   const syncTargetVisualAnchor = useCallback((pose) => {
     const state = targetVisualTemplateRef.current;
     const bounds = targetTorsoBounds(pose);
-    const hip = hipCenter(pose);
-    if (!state || !bounds || !hip) return;
+    const anchor = centerForPose(pose);
+    if (!state || !bounds || !anchor) return;
     state.anchor = bounds.center;
-    state.hipOffset = { x: hip.x - bounds.center.x, y: hip.y - bounds.center.y };
-  }, []);
-  const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
+    state.hipOffset = {
+      x: anchor.x - bounds.center.x,
+      y: anchor.y - bounds.center.y,
+    };
+  }, [centerForPose]);
+  const targetAnchorRef = useRef(null); // sport-specific center of locked target
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
   const [hasTarget, setHasTarget] = useState(false);
   const [findingAthlete, setFindingAthlete] = useState(false);
   const [trackingLost, setTrackingLost] = useState(false);
+  const [posePending, setPosePending] = useState(false);
   const [personCount, setPersonCount] = useState(0);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
   const lastQualityUpdateRef = useRef(0);
@@ -549,6 +613,7 @@ export default function PoseCanvas({
       const forcedTrackId = result?.forcedTrackId ?? null;
       const poseTracks = poseTrackerRef.current.update(poses, performance.now(), {
         forcedTrackId,
+        centerForPose,
       });
       lastPoseTracksRef.current = poseTracks;
 
@@ -562,7 +627,7 @@ export default function PoseCanvas({
         poses.length === 1
       ) {
         const candidateTrack = poseTracks.byPoseIndex.get(0);
-        const candidateCenter = hipCenter(poses[0]);
+        const candidateCenter = centerForPose(poses[0]);
         if (
           candidateTrack &&
           candidateCenter &&
@@ -596,7 +661,12 @@ export default function PoseCanvas({
         const continuousLocalMotion = lastSeenAtRef.current != null &&
           Date.now() - lastSeenAtRef.current < 400 &&
           localDistance < Math.max(0.14, (targetTrack.box?.height || 0) * 0.55);
-        if (continuousLocalMotion || !gallery.length || localSimilarity >= 0.5) {
+        const localSimilarityThreshold = sport === "swimming" ? 0.28 : 0.5;
+        if (
+          continuousLocalMotion ||
+          !gallery.length ||
+          localSimilarity >= localSimilarityThreshold
+        ) {
           targetIdx = targetTrack.poseIndex;
           targetAnchorRef.current = targetTrack.center;
           syncTargetVisualAnchor(targetTrack.landmarks);
@@ -614,7 +684,8 @@ export default function PoseCanvas({
         const enhancedPoseIndex = poseIndexInsideTrack(
           poses,
           selectedEnhancedTrack,
-          hipCenter
+          centerForPose,
+          { allowUpperBody: sport === "swimming" }
         );
         if (enhancedPoseIndex >= 0) {
           const candidateAppearance = samplePoseAppearance(poses[enhancedPoseIndex]);
@@ -622,7 +693,7 @@ export default function PoseCanvas({
           const similarity = gallery.length && candidateAppearance
             ? bestAppearanceSimilarity(gallery, candidateAppearance)
             : 1;
-          const candidateCenter = hipCenter(poses[enhancedPoseIndex]);
+          const candidateCenter = centerForPose(poses[enhancedPoseIndex]);
           const detectorDistance = candidateCenter && targetAnchorRef.current
             ? dist2D(candidateCenter, targetAnchorRef.current)
             : 0;
@@ -634,7 +705,12 @@ export default function PoseCanvas({
           // Smooth frame-to-frame motion remains authoritative even when a ball
           // or raised arms temporarily cover the jersey. Crossings and edit
           // cuts exceed this continuity gate and still require appearance.
-          if (continuousDetectorMotion || !gallery.length || similarity >= 0.5) {
+          const detectorSimilarityThreshold = sport === "swimming" ? 0.28 : 0.5;
+          if (
+            continuousDetectorMotion ||
+            !gallery.length ||
+            similarity >= detectorSimilarityThreshold
+          ) {
             targetIdx = enhancedPoseIndex;
             if (candidateCenter) targetAnchorRef.current = candidateCenter;
             lastSeenAtRef.current = Date.now();
@@ -656,7 +732,7 @@ export default function PoseCanvas({
         let bestCandidate = null;
         for (let index = 0; index < poses.length; index += 1) {
           const pose = poses[index];
-          const center = hipCenter(pose);
+          const center = centerForPose(pose);
           const appearance = samplePoseAppearance(pose);
           if (!center || !appearance) continue;
           const similarity = bestAppearanceSimilarity(
@@ -832,7 +908,7 @@ export default function PoseCanvas({
           : PERSON_COLORS[((poseTrack?.id || i + 1) - 1) % PERSON_COLORS.length];
 
         // A visible box makes it unambiguous which athletes are selectable.
-        const poseCenter = hipCenter(lm);
+        const poseCenter = centerForPose(lm);
         const representedByDetector =
           enhancedTrackingFresh &&
           poseCenter &&
@@ -888,6 +964,10 @@ export default function PoseCanvas({
           const pa = lm[a];
           const pb = lm[b];
           if (!pa || !pb) return;
+          if (
+            sport === "swimming" &&
+            (!swimmingLandmarkVisible(pa) || !swimmingLandmarkVisible(pb))
+          ) return;
           ctx.beginPath();
           ctx.moveTo(pa.x * w, pa.y * h);
           ctx.lineTo(pb.x * w, pb.y * h);
@@ -898,6 +978,7 @@ export default function PoseCanvas({
         ctx.fillStyle = isTarget ? JOINT_COLOR_TARGET : colour;
         lm.forEach((p, j) => {
           if (j < 11) return;
+          if (sport === "swimming" && !swimmingLandmarkVisible(p)) return;
           ctx.beginPath();
           ctx.arc(p.x * w, p.y * h, isTarget ? 5 : 3, 0, Math.PI * 2);
           ctx.fill();
@@ -1009,23 +1090,51 @@ export default function PoseCanvas({
         ctx.restore();
       }
 
-      // Tracking-lost detection
-      if (targetTrackIdRef.current != null && targetIdx === -1) {
+      const targetPoseUsable = targetIdx >= 0 && (
+        sport !== "swimming" || hasUsableSwimmingUpperBody(poses[targetIdx])
+      );
+      if (
+        runningRef.current &&
+        (selectedEnhancedTrack || targetPoseUsable)
+      ) {
+        captureIdentitySeenRef.current = true;
+      }
+
+      // Tracking-lost detection. A distant head-on swimmer may legitimately
+      // be absent at the beginning of a capture; do not call that a loss until
+      // this capture pass has actually seen the selected identity once.
+      if (
+        targetTrackIdRef.current != null &&
+        targetIdx === -1 &&
+        !selectedEnhancedTrack &&
+        (sport !== "swimming" || captureIdentitySeenRef.current)
+      ) {
         if (
           lastSeenAtRef.current &&
           Date.now() - lastSeenAtRef.current > TRACKING_LOST_GRACE_MS
         ) {
           if (!trackingLost) setTrackingLost(true);
         }
-      } else if (trackingLost && targetIdx !== -1) {
+      } else if (trackingLost && (targetIdx !== -1 || selectedEnhancedTrack)) {
         setTrackingLost(false);
+      }
+
+      if (sport === "swimming" && runningRef.current) {
+        const identityStillTracked = Boolean(
+          selectedEnhancedTrack ||
+          manualUnderwaterLockRef.current ||
+          targetTrackIdRef.current != null
+        );
+        setPosePending(identityStillTracked && !targetPoseUsable);
+      } else {
+        setPosePending(false);
       }
 
       // Recording: only record the target's landmarks
       if (
         runningRef.current &&
         startedAtRef.current != null &&
-        targetIdx !== -1
+        targetPoseUsable
       ) {
         const t = (Date.now() - startedAtRef.current) / 1000;
         const lm = poses[targetIdx];
@@ -1065,7 +1174,7 @@ export default function PoseCanvas({
       } else if (
         runningRef.current &&
         startedAtRef.current != null &&
-        targetIdx === -1
+        !targetPoseUsable
       ) {
         // record an empty frame so timeline remains continuous
         const t = (Date.now() - startedAtRef.current) / 1000;
@@ -1079,7 +1188,14 @@ export default function PoseCanvas({
         });
       }
     },
-    [mode, isFrontCam, trackingLost, sport, syncTargetVisualAnchor]
+    [
+      mode,
+      isFrontCam,
+      trackingLost,
+      sport,
+      centerForPose,
+      syncTargetVisualAnchor,
+    ]
   );
 
   /* ---------------- Reset target tracking when video source changes ---------------- */
@@ -1093,6 +1209,7 @@ export default function PoseCanvas({
     manifestBuildAbortRef.current = null;
     trackingManifestRef.current = null;
     setManifestStatus("idle");
+    setManifestProgress(0);
     targetTrackIdRef.current = null;
     targetUsesRoiRef.current = false;
     targetAppearanceGalleryRef.current = [];
@@ -1125,6 +1242,7 @@ export default function PoseCanvas({
     setHasTarget(false);
     setFindingAthlete(false);
     setTrackingLost(false);
+    setPosePending(false);
     setPersonCount(0);
     setHoopRoi(null);
     setPlacementStep("athlete");
@@ -1150,32 +1268,52 @@ export default function PoseCanvas({
     const controller = new AbortController();
     manifestBuildAbortRef.current = controller;
     setManifestStatus("building");
+    setManifestProgress(0);
 
     buildTrackingManifest({
       video,
       personDetector: personDetectorRef.current,
       poseLandmarker: landmarkerRef.current,
       sport,
+      // The manifest and interactive canvas share these MediaPipe graph
+      // instances. They must therefore share the same monotonically increasing
+      // clocks even when full-clip seeking interleaves with a render tick or tap.
+      nextPoseTimestamp,
+      nextPersonTimestamp: nextPersonTrackTimestamp,
+      onProgress: (progress) => {
+        setManifestProgress(Math.round(progress * 100));
+      },
       signal: controller.signal,
     })
       .then((manifest) => {
         if (controller.signal.aborted) return;
         trackingManifestRef.current = manifest;
         setManifestStatus(manifest ? "ready" : "unavailable");
+        setManifestProgress(manifest ? 100 : 0);
       })
       .catch((error) => {
         console.warn(
           "[PoseCanvas] Whole-clip tracking analysis failed; falling back to live tracking",
           error
         );
-        if (!controller.signal.aborted) setManifestStatus("unavailable");
+        if (!controller.signal.aborted) {
+          setManifestStatus("unavailable");
+          setManifestProgress(0);
+        }
       })
       .finally(() => {
         if (manifestBuildAbortRef.current === controller) manifestBuildAbortRef.current = null;
       });
 
     return () => controller.abort();
-  }, [mode, status, enhancedTrackingState, sport]);
+  }, [
+    mode,
+    status,
+    enhancedTrackingState,
+    sport,
+    nextPoseTimestamp,
+    nextPersonTrackTimestamp,
+  ]);
 
   /* ---------------- Pose model + camera setup ---------------- */
   useEffect(() => {
@@ -1183,9 +1321,13 @@ export default function PoseCanvas({
     async function init() {
       try {
         setStatus("loading");
-        const landmarker = await loadPoseLandmarker();
+        const [landmarker, swimmingImageLandmarker] = await Promise.all([
+          loadPoseLandmarker(),
+          sport === "swimming" ? loadSwimmingImageLandmarker() : Promise.resolve(null),
+        ]);
         if (cancelled) return;
         landmarkerRef.current = landmarker;
+        swimmingImageLandmarkerRef.current = swimmingImageLandmarker;
 
         // Start person-box detection and the backend Supervision/BoT-SORT
         // session without delaying camera startup or pose capture.
@@ -1350,7 +1492,11 @@ export default function PoseCanvas({
           //   check, because `currentTime` for live streams can stall in
           //   Chromium and would silently freeze the skeleton.
           const now = performance.now();
-          const timeGate = now - lastDetectAtRef.current >= 30;
+          // A swimming miss may perform one additional, rotated crop scan.
+          // 15 Hz preserves smooth playback while retaining ample samples for
+          // arm-cycle analysis; other sports continue at the native ~30 Hz.
+          const detectionIntervalMs = sport === "swimming" ? 66 : 30;
+          const timeGate = now - lastDetectAtRef.current >= detectionIntervalMs;
           const liveOk = mode === "live" ? !v?.paused && !v?.ended : true;
           const uploadAdvanced =
             mode === "upload" ? v?.currentTime !== lastDetectVideoTimeRef.current : true;
@@ -1381,6 +1527,9 @@ export default function PoseCanvas({
               const localTarget = targetTrackIdRef.current != null
                 ? poseTrackerRef.current.getTrack(targetTrackIdRef.current)
                 : null;
+              const identityReferenceCenter = sport === "swimming"
+                ? targetAnchorRef.current || localTarget?.center
+                : localTarget?.center;
               const gallery = targetAppearanceGalleryRef.current;
               const scoreIdentityTrack = (track) => {
                 if (!track) return null;
@@ -1389,20 +1538,20 @@ export default function PoseCanvas({
                   ? bestAppearanceSimilarity(gallery, descriptor)
                   : 1;
                 const roi = paddedTrackRoi(track, 0);
-                const distance = localTarget?.center && roi?.center
-                  ? dist2D(localTarget.center, roi.center)
+                const distance = identityReferenceCenter && roi?.center
+                  ? dist2D(identityReferenceCenter, roi.center)
                   : 0;
                 return { track, similarity, distance, score: similarity * 2.5 - distance * 2 };
               };
               const selectedIdentity = scoreIdentityTrack(selected);
               let identityTrack = selectedIdentity &&
                 (!gallery.length || selectedIdentity.similarity >= 0.34) &&
-                (!localTarget?.center || selectedIdentity.distance <= 0.3)
+                (!identityReferenceCenter || selectedIdentity.distance <= 0.3)
                 ? selected
                 : null;
               if (
                 !identityTrack &&
-                localTarget?.center
+                identityReferenceCenter
               ) {
                 const candidate = tracks
                   .map(scoreIdentityTrack)
@@ -1428,21 +1577,29 @@ export default function PoseCanvas({
               if (roi && targetUsesRoiRef.current) {
                 const localTargetFresh = localTarget?.updatedAt != null &&
                   performance.now() - localTarget.updatedAt < 220;
-                if (!localTargetFresh) targetAnchorRef.current = roi.center;
+                // Swimming uses the current detector box as authority because
+                // hips may be hidden or badly foreshortened. Other sports keep
+                // the lower-latency local pose prediction while it is fresh.
+                if (sport === "swimming" || !localTargetFresh) {
+                  targetAnchorRef.current = roi.center;
+                }
               }
               if (v.paused && !runningRef.current) {
                 drawResults({ landmarks: lastPosesRef.current });
               }
             };
 
+            let manifestFrame = null;
             if (trackingManifestRef.current) {
               // Upload mode with a finished manifest: every sampled
               // timestamp's identities were already resolved offline, at the
               // clip's real cadence, with no network round trip in the loop.
               // Look them up directly instead of the throttled live call.
-              applyEnhancedTracks(
-                lookupManifestTracks(trackingManifestRef.current, v.currentTime) || []
+              manifestFrame = lookupManifestFrame(
+                trackingManifestRef.current,
+                v.currentTime
               );
+              applyEnhancedTracks(manifestFrame?.tracks || []);
             } else if (
               enhancedTrackingReadyRef.current &&
               personDetectorRef.current &&
@@ -1450,11 +1607,7 @@ export default function PoseCanvas({
               now - lastPersonTrackAtRef.current >= 140
             ) {
               lastPersonTrackAtRef.current = now;
-              const trackingTimestamp = Math.max(
-                now,
-                lastPersonTrackTimestampRef.current + 0.01
-              );
-              lastPersonTrackTimestampRef.current = trackingTimestamp;
+              const trackingTimestamp = nextPersonTrackTimestamp();
               enhancedClientRef.current
                 .process(
                   v,
@@ -1475,7 +1628,19 @@ export default function PoseCanvas({
             }
             try {
               let result;
-              if (targetUsesRoiRef.current && targetAnchorRef.current) {
+              const selectedManifestTrackId = selectedEnhancedTrackIdRef.current;
+              const canUseManifestPose = manifestHasPoseForTrack(
+                manifestFrame,
+                selectedManifestTrackId,
+                centerForPose,
+                { allowUpperBody: sport === "swimming" }
+              );
+              if (mode === "upload" && canUseManifestPose) {
+                // The whole-clip pass already sampled MediaPipe at 15 fps. Reuse
+                // those landmarks so playback remains smooth and the skeleton,
+                // tracking box, and recorded motion all reference one frame.
+                result = { landmarks: manifestFrame.poses };
+              } else if (targetUsesRoiRef.current && targetAnchorRef.current) {
                 const enhancedTarget = selectedEnhancedTrackIdRef.current == null
                   ? null
                   : enhancedTracksRef.current.find(
@@ -1504,8 +1669,7 @@ export default function PoseCanvas({
                 const lostForMs = lastSeenAtRef.current == null
                   ? 0
                   : Date.now() - lastSeenAtRef.current;
-                const underwaterApproach = sport === "swimming" &&
-                  v.videoHeight > v.videoWidth;
+                const underwaterApproach = sport === "swimming";
                 // Underwater reflections, bubbles, and caustics change too
                 // quickly for grayscale template matching to be trustworthy.
                 const visualCenter = enhancedRoi || underwaterApproach
@@ -1514,15 +1678,23 @@ export default function PoseCanvas({
                 // The local pose prediction is updated on the current video
                 // frame. Prefer it over the asynchronous detector ROI so the
                 // crop moves with the athlete instead of chasing old boxes.
-                const identityCenter = selectedTrack?.center
-                  ? predictedCenter
-                  : enhancedRoi?.center || visualCenter || predictedCenter;
+                const manifestDetectorCenter = manifestFrame && enhancedRoi
+                  ? enhancedRoi.center
+                  : null;
+                const identityCenter = manifestDetectorCenter ||
+                  (selectedTrack?.center
+                    ? predictedCenter
+                    : enhancedRoi?.center || visualCenter || predictedCenter);
                 let searchCenter = identityCenter;
                 let searchWidth = underwaterApproach
-                  ? 0.9
+                  ? enhancedRoi
+                    ? Math.max(0.28, Math.min(0.72, enhancedRoi.width))
+                    : 0.9
                   : enhancedRoi?.width || 0.38;
                 let searchHeight = underwaterApproach
-                  ? 0.72
+                  ? enhancedRoi
+                    ? Math.max(0.36, Math.min(0.72, enhancedRoi.height))
+                    : 0.72
                   : enhancedRoi?.height || 0.72;
                 if (
                   lostForMs > 300 &&
@@ -1561,7 +1733,7 @@ export default function PoseCanvas({
                 let closestSimilarity = 0;
                 let bestTargetScore = -Infinity;
                 for (const pose of targetedPoses) {
-                  const d = dist2D(hipCenter(pose), identityCenter);
+                  const d = dist2D(centerForPose(pose), identityCenter);
                   const maximumDistance = enhancedRoi
                     ? Math.max(0.24, Math.min(0.48, enhancedRoi.height * 0.58))
                     : underwaterApproach
@@ -1585,7 +1757,12 @@ export default function PoseCanvas({
                   const appearance = samplePoseAppearance(pose);
                   const gallery = targetAppearanceGalleryRef.current;
                   const insideDetectorCandidate = enhancedTarget &&
-                    poseIndexInsideTrack([pose], enhancedTarget, hipCenter) === 0;
+                    poseIndexInsideTrack(
+                      [pose],
+                      enhancedTarget,
+                      centerForPose,
+                      { allowUpperBody: sport === "swimming" }
+                    ) === 0;
                   const similarity = gallery.length && appearance
                     ? bestAppearanceSimilarity(gallery, appearance)
                     : insideDetectorCandidate ? 0.6 : 1;
@@ -1614,14 +1791,15 @@ export default function PoseCanvas({
                   }
                 }
                 if (closestTarget && closestAppearance) {
-                  const center = hipCenter(closestTarget);
+                  const center = centerForPose(closestTarget);
                   const recentlyVisible = lastSeenAtRef.current != null &&
                     Date.now() - lastSeenAtRef.current < 220;
                   const insideSelectedDetector = enhancedTarget &&
                     poseIndexInsideTrack(
                       [closestTarget],
                       enhancedTarget,
-                      hipCenter
+                      centerForPose,
+                      { allowUpperBody: sport === "swimming" }
                     ) === 0;
                   const continuousMatch =
                     (underwaterApproach &&
@@ -1708,6 +1886,12 @@ export default function PoseCanvas({
                 // typical 1-athlete case. Multi-athlete deep-scan can be re-added
                 // as an optional toggle later.
                 result = lm.detectForVideo(v, nextPoseTimestamp());
+              }
+              if (sport === "swimming" && result?.landmarks) {
+                result = {
+                  ...result,
+                  landmarks: removeUnderwaterReflectionPoses(result.landmarks),
+                };
               }
               drawResults(result);
 
@@ -1984,6 +2168,7 @@ export default function PoseCanvas({
       }
       enhancedTrackingReadyRef.current = false;
       personDetectorRef.current = null;
+      swimmingImageLandmarkerRef.current = null;
       const enhancedClient = enhancedClientRef.current;
       enhancedClientRef.current = null;
       if (enhancedClient) enhancedClient.stop();
@@ -2329,8 +2514,8 @@ export default function PoseCanvas({
   function captureTargetVisualTemplate(pose) {
     const video = videoRef.current;
     const bounds = targetTorsoBounds(pose);
-    const hip = hipCenter(pose);
-    if (!video?.videoWidth || !video?.videoHeight || !bounds || !hip) return;
+    const anchor = centerForPose(pose);
+    if (!video?.videoWidth || !video?.videoHeight || !bounds || !anchor) return;
     const canvas = document.createElement("canvas");
     canvas.width = 20;
     canvas.height = 28;
@@ -2352,7 +2537,10 @@ export default function PoseCanvas({
       normWidth: bounds.width,
       normHeight: bounds.height,
       anchor: bounds.center,
-      hipOffset: { x: hip.x - bounds.center.x, y: hip.y - bounds.center.y },
+      hipOffset: {
+        x: anchor.x - bounds.center.x,
+        y: anchor.y - bounds.center.y,
+      },
     };
   }
 
@@ -2421,7 +2609,7 @@ export default function PoseCanvas({
   function lockPose(poseIndex, { forceRoi = false, identityTrack = null } = {}) {
     const pose = lastPosesRef.current[poseIndex];
     const poseTrack = lastPoseTracksRef.current.byPoseIndex.get(poseIndex);
-    const center = hipCenter(pose);
+    const center = centerForPose(pose);
     if (!center || !poseTrack) return false;
     targetTrackIdRef.current = poseTrack.id;
     poseTrackerRef.current.touchTrack(poseTrack.id, performance.now());
@@ -2441,14 +2629,13 @@ export default function PoseCanvas({
     // Moving a VIDEO-mode MediaPipe crop every frame introduces temporal lag.
     // Reserve close-up inference for genuinely small/far athletes; normal-sized
     // athletes use the native full frame so landmarks and video stay aligned.
-    const video = videoRef.current;
-    const underwaterApproach = sport === "swimming" &&
-      video?.videoHeight > video?.videoWidth;
+    const underwaterApproach = sport === "swimming";
     targetUsesRoiRef.current = underwaterApproach ||
       (Boolean(forceRoi) && observedHeight < SMALL_TARGET_ROI_HEIGHT);
     lastSeenAtRef.current = Date.now();
     setHasTarget(true);
     setTrackingLost(false);
+    setPosePending(false);
     setError(null);
     setPlacementStep(sport === "basketball" ? "hoop" : "ready");
     // Paused uploads do not produce another animation frame, so repaint the
@@ -2461,8 +2648,9 @@ export default function PoseCanvas({
 
   function detectPosesNearPoint(point, options = {}) {
     const lm = landmarkerRef.current;
+    const swimmingLm = swimmingImageLandmarkerRef.current;
     const video = videoRef.current;
-    if (!lm || !video?.videoWidth || !video?.videoHeight) return [];
+    if ((!lm && !swimmingLm) || !video?.videoWidth || !video?.videoHeight) return [];
     // Tap selection must stay tightly centered on the requested athlete.
     // A wide crop lets MediaPipe return a larger nearby player instead of the
     // smaller person directly under the cursor.
@@ -2470,7 +2658,10 @@ export default function PoseCanvas({
     const cropHeight = options.cropHeight || 0.72;
     const cropX = Math.max(0, Math.min(1 - cropWidth, point.x - cropWidth / 2));
     const cropY = Math.max(0, Math.min(1 - cropHeight, point.y - cropHeight * 0.52));
-    const scan = document.createElement("canvas");
+    if (!swimmingPoseCropCanvasRef.current) {
+      swimmingPoseCropCanvasRef.current = document.createElement("canvas");
+    }
+    const scan = swimmingPoseCropCanvasRef.current;
     scan.width = 512;
     scan.height = Math.max(
       384,
@@ -2491,20 +2682,58 @@ export default function PoseCanvas({
       scan.width,
       scan.height
     );
+    const crop = { x: cropX, y: cropY, width: cropWidth, height: cropHeight };
+
+    if (sport === "swimming" && swimmingLm) {
+      const mapAndFilter = (result, rotation = "none") =>
+        removeUnderwaterReflectionPoses(
+          mapSwimmingCropPoses(result?.landmarks, crop, rotation)
+        );
+
+      // IMAGE mode reruns person detection inside the identity box instead of
+      // inheriting MediaPipe's stale, hip-centred temporal ROI.
+      let mappedPoses = mapAndFilter(swimmingLm.detect(scan));
+      if (mappedPoses.some(hasUsableSwimmingUpperBody)) return mappedPoses;
+
+      // BlazePose is trained primarily on upright people. When the swimmer is
+      // horizontal, rotate the crop for inference and map all landmarks back
+      // to the original video coordinates. Alternate direction after a miss
+      // so an upside-down interpretation cannot remain permanently stuck.
+      if (!swimmingRotatedCropCanvasRef.current) {
+        swimmingRotatedCropCanvasRef.current = document.createElement("canvas");
+      }
+      const rotated = swimmingRotatedCropCanvasRef.current;
+      rotated.width = scan.height;
+      rotated.height = scan.width;
+      const rotatedCtx = rotated.getContext("2d");
+      const rotation = swimmingRotationRef.current;
+      rotatedCtx.save();
+      if (rotation === "clockwise") {
+        rotatedCtx.translate(rotated.width, 0);
+        rotatedCtx.rotate(Math.PI / 2);
+      } else {
+        rotatedCtx.translate(0, rotated.height);
+        rotatedCtx.rotate(-Math.PI / 2);
+      }
+      rotatedCtx.drawImage(scan, 0, 0);
+      rotatedCtx.restore();
+
+      mappedPoses = mapAndFilter(swimmingLm.detect(rotated), rotation);
+      if (!mappedPoses.some(hasUsableSwimmingUpperBody)) {
+        swimmingRotationRef.current = rotation === "clockwise"
+          ? "counterclockwise"
+          : "clockwise";
+      }
+      return mappedPoses;
+    }
+
     const result = lm.detectForVideo(scan, nextPoseTimestamp());
-    return (result?.landmarks || []).map((pose) =>
-      pose.map((landmark) => ({
-        ...landmark,
-        x: cropX + landmark.x * cropWidth,
-        y: cropY + landmark.y * cropHeight,
-      }))
-    );
+    return mapSwimmingCropPoses(result?.landmarks, crop);
   }
 
   async function findAndLockPoseAtPoint(click) {
     const video = videoRef.current;
-    const underwaterApproach = sport === "swimming" &&
-      video?.videoHeight > video?.videoWidth;
+    const underwaterApproach = sport === "swimming";
     const enhancedSelection =
       enhancedTrackingReadyRef.current &&
       Date.now() - enhancedTracksUpdatedAtRef.current < 1000
@@ -2517,7 +2746,14 @@ export default function PoseCanvas({
     // When a detector box was tapped, always run a tight close-up pose scan.
     // Full-frame MediaPipe can merge landmarks from adjacent athletes even
     // though the person detector has correctly separated their boxes.
-    const directIndex = enhancedSelection ? -1 : findPoseAtPoint(click);
+    const directIndex = enhancedSelection
+      ? poseIndexInsideTrack(
+          lastPosesRef.current,
+          enhancedSelection,
+          centerForPose,
+          { allowUpperBody: sport === "swimming" }
+        )
+      : findPoseAtPoint(click);
     if (directIndex >= 0) {
       if (enhancedSelection) selectedEnhancedTrackIdRef.current = enhancedSelection.id;
       const locked = lockPose(directIndex, { forceRoi: Boolean(enhancedSelection) });
@@ -2540,7 +2776,11 @@ export default function PoseCanvas({
       );
       if (!closeUpPoses.length) {
         if (!underwaterApproach) return false;
-        selectedEnhancedTrackIdRef.current = null;
+        // The detector box is still a valid identity lock even when the
+        // head-on swimmer is too small for pose landmarks on this frame. Keep
+        // that BoT-SORT ID so capture can follow the same swimmer until the
+        // close-up pose model produces the first skeleton.
+        selectedEnhancedTrackIdRef.current = enhancedSelection?.id ?? null;
         targetTrackIdRef.current = null;
         targetAnchorRef.current = click;
         targetUsesRoiRef.current = true;
@@ -2551,6 +2791,7 @@ export default function PoseCanvas({
         lastSeenAtRef.current = Date.now();
         setHasTarget(true);
         setTrackingLost(false);
+        setPosePending(false);
         setError(null);
         setPlacementStep("ready");
         setFrameQuality({
@@ -2567,16 +2808,19 @@ export default function PoseCanvas({
         const trackedPoseIndex = poseIndexInsideTrack(
           closeUpPoses,
           enhancedSelection,
-          hipCenter
+          centerForPose,
+          { allowUpperBody: sport === "swimming" }
         );
         if (trackedPoseIndex < 0) return false;
         selectedPose = closeUpPoses[trackedPoseIndex];
-        if (!poseMatchesTrack(selectedPose, enhancedSelection)) return false;
+        if (!poseMatchesTrack(selectedPose, enhancedSelection, {
+          allowUpperBody: sport === "swimming",
+        })) return false;
       } else {
         selectedPose = closeUpPoses[0];
         let bestDistance = Infinity;
         for (const pose of closeUpPoses) {
-          const center = hipCenter(pose);
+          const center = centerForPose(pose);
           const d = dist2D(center, click);
           if (d < bestDistance) {
             bestDistance = d;
@@ -2586,9 +2830,9 @@ export default function PoseCanvas({
       }
 
       const merged = [...lastPosesRef.current];
-      const selectedCenter = hipCenter(selectedPose);
+      const selectedCenter = centerForPose(selectedPose);
       let selectedIndex = merged.findIndex(
-        (pose) => dist2D(hipCenter(pose), selectedCenter) < 0.06
+        (pose) => dist2D(centerForPose(pose), selectedCenter) < 0.06
       );
       if (selectedIndex >= 0) merged[selectedIndex] = selectedPose;
       else {
@@ -2664,7 +2908,21 @@ export default function PoseCanvas({
       }
     }
 
-    const locked = await findAndLockPoseAtPoint(click);
+    let locked = false;
+    try {
+      locked = await findAndLockPoseAtPoint(click);
+    } catch (selectionError) {
+      // MediaPipe errors from a single tap should remain recoverable instead of
+      // escaping the async React handler and replacing the app with its runtime
+      // error overlay. The next frame/tap can retry with the shared clock.
+      console.warn("[PoseCanvas] athlete selection inference failed", selectionError);
+      setError(null);
+      setFrameQuality({
+        level: "poor",
+        issues: ["Athlete selection failed — advance a frame and tap again"],
+      });
+      return;
+    }
     if (!locked) {
       // A missed selection is recoverable. Keep the video controls and canvas
       // interactive so the user can advance a frame and try the same athlete
@@ -2692,6 +2950,7 @@ export default function PoseCanvas({
     lastSeenAtRef.current = null;
     setHasTarget(false);
     setTrackingLost(false);
+    setPosePending(false);
     setPlacementStep("athlete");
     hoopTemplateRef.current = null;
     hoopRoiRef.current = null;
@@ -2833,6 +3092,12 @@ export default function PoseCanvas({
       setError("Tap the athlete you want to track first.");
       return;
     }
+    if (mode === "upload" && manifestStatus === "building") {
+      setError(
+        "Full-clip athlete tracking is still finishing. Please wait a moment, then start capture."
+      );
+      return;
+    }
     const v = videoRef.current;
     if (v && mode === "upload") {
       const playbackPlan = getCapturePlaybackPlan({
@@ -2862,9 +3127,14 @@ export default function PoseCanvas({
           lastPoseTracksRef.current = { byPoseIndex: new Map(), tracks: [] };
           enhancedTracksRef.current = [];
           enhancedTracksUpdatedAtRef.current = 0;
-          selectedEnhancedTrackIdRef.current = null;
+          // Manifest IDs cover the entire clip and remain valid after a rewind.
+          // Clearing the selected ID here made Start Capture discard the box
+          // that the user had just verified during preview playback.
+          if (!trackingManifestRef.current) {
+            selectedEnhancedTrackIdRef.current = null;
+          }
           targetReacquireRef.current = null;
-          if (enhancedClientRef.current) {
+          if (!trackingManifestRef.current && enhancedClientRef.current) {
             await enhancedClientRef.current.restart();
           }
         } catch (rewindError) {
@@ -2874,6 +3144,8 @@ export default function PoseCanvas({
     }
     setError(null);
     setTrackingLost(false);
+    setPosePending(false);
+    captureIdentitySeenRef.current = false;
     framesRef.current = [];
     thumbsRef.current = [];
     lastThumbAtRef.current = 0;
@@ -3227,7 +3499,7 @@ export default function PoseCanvas({
           />
           <span className="text-[10px] font-display uppercase tracking-widest font-bold">
             {mode === "upload" && manifestStatus === "building"
-              ? "Analyzing full clip"
+              ? `Analyzing full clip · ${manifestProgress}%`
               : mode === "upload" && manifestStatus === "ready"
                 ? "Full-clip identity lock"
                 : enhancedTrackingState === "ready"
@@ -3294,10 +3566,18 @@ export default function PoseCanvas({
           </div>
         )}
         {hasTarget && running && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/70 backdrop-blur px-3 py-1.5 border border-[#00ff88]/40 pointer-events-none">
-            <Target className="w-3 h-3 text-[#00ff88]" />
-            <span className="text-[11px] font-display uppercase tracking-widest font-bold text-[#00ff88]">
-              Tracking
+          <div className={`absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/70 backdrop-blur px-3 py-1.5 border pointer-events-none ${
+            posePending ? "border-[#ffab00]/50" : "border-[#00ff88]/40"
+          }`}>
+            <Target className={`w-3 h-3 ${posePending ? "text-[#ffab00]" : "text-[#00ff88]"}`} />
+            <span className={`text-[11px] font-display uppercase tracking-widest font-bold ${
+              posePending ? "text-[#ffab00]" : "text-[#00ff88]"
+            }`}>
+              {posePending
+                ? "Tracking swimmer · arm pose pending"
+                : sport === "swimming"
+                  ? "Tracking + upper-body mocap"
+                  : "Tracking"}
             </span>
           </div>
         )}
@@ -3448,7 +3728,9 @@ export default function PoseCanvas({
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ffab00]/60 px-5 py-3 text-center pointer-events-none">
             <AlertTriangle className="w-5 h-5 text-[#ffab00] mx-auto" />
             <div className="mt-1 text-[11px] uppercase tracking-widest font-display font-bold text-[#ffab00]">
-              Selected athlete lost — analysis paused
+              {sport === "swimming"
+                ? "Swimmer identity lost — motion capture paused"
+                : "Selected athlete lost — analysis paused"}
             </div>
           </div>
         )}
@@ -3572,11 +3854,23 @@ export default function PoseCanvas({
           <button
             data-testid="start-capture-btn"
             onClick={start}
-            disabled={status !== "ready" || !hasTarget}
+            disabled={
+              status !== "ready" ||
+              !hasTarget ||
+              (mode === "upload" && manifestStatus === "building")
+            }
             className="bg-[#ff3b30] hover:bg-[#ff5c53] disabled:opacity-40 disabled:cursor-not-allowed text-white font-display uppercase tracking-wide px-6 py-3 transition-colors"
-            title={!hasTarget ? "Tap the athlete to track first" : ""}
+            title={
+              !hasTarget
+                ? "Tap the athlete to track first"
+                : mode === "upload" && manifestStatus === "building"
+                  ? "Wait for full-clip identity tracking to finish"
+                  : ""
+            }
           >
-            ● Start capture
+            {mode === "upload" && manifestStatus === "building"
+              ? `Preparing identity lock ${manifestProgress}%`
+              : "● Start capture"}
           </button>
         ) : (
           <button
@@ -3590,6 +3884,11 @@ export default function PoseCanvas({
         {!hasTarget && status === "ready" && (
           <span className="self-center text-xs text-zinc-500 font-mono">
             ↑ Tap inside an athlete box—or tap any athlete to scan that area
+          </span>
+        )}
+        {hasTarget && mode === "upload" && manifestStatus === "building" && (
+          <span className="self-center text-xs text-[#ffab00] font-mono max-w-sm">
+            Athlete remains selected. Start enables automatically when full-clip tracking finishes.
           </span>
         )}
       </div>

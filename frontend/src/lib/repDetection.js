@@ -19,6 +19,10 @@
 import { detectShots, annotateRepsWithOutcomes, makesVsMissesStats } from "./shotDetection";
 import { L, angle } from "./repDetectionConstants";
 import { classifyStroke, contactPointMetrics, readyPositionStats, strokeBreakdown } from "./pickleballAnalysis";
+import {
+  swimmingArmExtensionSignal,
+  swimmingLandmarkVisible,
+} from "./swimmingPose";
 
 // (kept for backward-compat — re-export same constants/helpers used below)
 // MediaPipe BlazePose 33 landmark indices — see repDetectionConstants.js
@@ -183,26 +187,51 @@ const SPORTS = {
 
   swimming: {
     label: "swim stroke",
-    // Signal: alternating wrist Y. Use right wrist (higher when entering); peaks = strokes
-    signal: (lm) => {
-      const rw = lm[L.RIGHT_WRIST];
-      const lw = lm[L.LEFT_WRIST];
-      if (!rw && !lw) return 0;
-      return 1 - Math.min(rw?.y ?? 1, lw?.y ?? 1);
-    },
-    minRepIntervalSec: 0.7,
-    minProminence: 0.05,
+    // Normalize arm reach by shoulder width so a stroke remains measurable
+    // whether the swimmer is horizontal, diagonal, or approaching the camera.
+    signal: (lm) => swimmingArmExtensionSignal(lm),
+    minRepIntervalSec: 0.55,
+    minProminence: 0.12,
     apex: (lm) => {
-      const lY = lm[L.LEFT_WRIST]?.y ?? 1;
-      const rY = lm[L.RIGHT_WRIST]?.y ?? 1;
-      const isLeft = lY < rY;
+      const leftShoulder = lm[L.LEFT_SHOULDER];
+      const rightShoulder = lm[L.RIGHT_SHOULDER];
+      const leftWrist = lm[L.LEFT_WRIST];
+      const rightWrist = lm[L.RIGHT_WRIST];
+      const leftReach = swimmingLandmarkVisible(leftShoulder) &&
+        swimmingLandmarkVisible(leftWrist)
+        ? Math.hypot(leftShoulder.x - leftWrist.x, leftShoulder.y - leftWrist.y)
+        : -1;
+      const rightReach = swimmingLandmarkVisible(rightShoulder) &&
+        swimmingLandmarkVisible(rightWrist)
+        ? Math.hypot(rightShoulder.x - rightWrist.x, rightShoulder.y - rightWrist.y)
+        : -1;
+      const isLeft = leftReach >= rightReach;
       const shoulder = isLeft ? lm[L.LEFT_SHOULDER] : lm[L.RIGHT_SHOULDER];
       const elbow = isLeft ? lm[L.LEFT_ELBOW] : lm[L.RIGHT_ELBOW];
       const wrist = isLeft ? lm[L.LEFT_WRIST] : lm[L.RIGHT_WRIST];
       const hip = isLeft ? lm[L.LEFT_HIP] : lm[L.RIGHT_HIP];
+      const shoulderTilt =
+        swimmingLandmarkVisible(leftShoulder) &&
+        swimmingLandmarkVisible(rightShoulder)
+          ? Math.abs(
+              Math.atan2(
+                rightShoulder.y - leftShoulder.y,
+                rightShoulder.x - leftShoulder.x
+              ) * 180 / Math.PI
+            )
+          : null;
       return {
-        catch_elbow_angle: angle(shoulder, elbow, wrist),
-        body_roll_y: shoulder && hip ? Math.abs(shoulder.y - hip.y) : null,
+        catch_elbow_angle:
+          swimmingLandmarkVisible(shoulder) &&
+          swimmingLandmarkVisible(elbow) &&
+          swimmingLandmarkVisible(wrist)
+            ? angle(shoulder, elbow, wrist)
+            : null,
+        body_roll_y:
+          swimmingLandmarkVisible(shoulder) && swimmingLandmarkVisible(hip)
+            ? Math.abs(shoulder.y - hip.y)
+            : null,
+        shoulder_tilt_deg: shoulderTilt,
       };
     },
     targets: {

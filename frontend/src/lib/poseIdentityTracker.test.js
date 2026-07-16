@@ -106,4 +106,22 @@ describe("PoseIdentityTracker", () => {
     expect(result.byPoseIndex.get(0).id).toBe(selectedId);
     expect(result.tracks.filter((track) => track.landmarks)).toHaveLength(1);
   });
+
+  test("supports a sport-specific upper-body center", () => {
+    const tracker = new PoseIdentityTracker();
+    const swimmer = makePose(0.35);
+    swimmer[23] = { x: 0.9, y: 0.9, visibility: 0.02 };
+    swimmer[24] = { x: 0.9, y: 0.9, visibility: 0.02 };
+    const shoulderCenter = (pose) => ({
+      x: (pose[11].x + pose[12].x) / 2,
+      y: (pose[11].y + pose[12].y) / 2,
+    });
+
+    const result = tracker.update([swimmer], 0, {
+      centerForPose: shoulderCenter,
+    });
+
+    expect(result.byPoseIndex.get(0).center.x).toBeCloseTo(0.35, 5);
+    expect(result.byPoseIndex.get(0).center.y).toBeCloseTo(0.43, 5);
+  });
 });

@@ -101,8 +101,8 @@ function shapeDifference(a, b) {
   return count >= 4 ? total / count : 0.5;
 }
 
-function observation(landmarks, poseIndex) {
-  const center = poseCenter(landmarks);
+function observation(landmarks, poseIndex, centerForPose = poseCenter) {
+  const center = centerForPose(landmarks);
   const box = poseBox(landmarks);
   if (!center || !box) return null;
   return {
@@ -175,9 +175,15 @@ export class PoseIdentityTracker {
     track.lastSeenAt = nowMs;
   }
 
-  update(poses, nowMs = performance.now(), { forcedTrackId = null } = {}) {
+  update(
+    poses,
+    nowMs = performance.now(),
+    { forcedTrackId = null, centerForPose = poseCenter } = {}
+  ) {
     const observations = (poses || [])
-      .map((landmarks, poseIndex) => observation(landmarks, poseIndex))
+      .map((landmarks, poseIndex) =>
+        observation(landmarks, poseIndex, centerForPose)
+      )
       .filter(Boolean);
 
     for (const [trackId, track] of this.tracks) {

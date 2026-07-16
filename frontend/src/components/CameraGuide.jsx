@@ -55,17 +55,17 @@ const CAMERA_GUIDES = {
   },
   swimming: {
     label: "Swimming",
-    headline: "Side-on preferred · underwater approach works when swimmer is close",
+    headline: "Underwater front or side view · shoulders and arms drive mocap",
     live_tips: [
       "For underwater head-on capture, keep the camera fully submerged and aim slightly down to avoid surface reflections.",
-      "Wait until the swimmer's shoulders and hips are clearly recognizable before starting capture.",
-      "For stroke biomechanics, a side-on underwater or pool-deck view remains the most accurate angle.",
+      "Keep the swimmer's shoulders and at least one arm visible; hips and legs may remain obscured.",
+      "A side-on underwater or pool-deck view adds hip and kick analysis, but is not required for arm-stroke counting.",
       "Keep the camera fixed; bubbles and rapid panning reduce pose confidence.",
     ],
     upload_tips: [
       "30-60 seconds of swim is enough — 4-8 stroke cycles.",
       "Trim out turns at the wall (we don't analyze those yet).",
-      "For head-on underwater clips, trim the distant approach where the swimmer is only a few pixels tall.",
+      "For a distant approach, wait for Full-clip identity lock before selecting the swimmer and starting capture.",
       "Surface reflections can resemble another person; fully submerged, slightly downward-facing footage tracks best.",
     ],
   },

@@ -19,12 +19,15 @@ export function assessFrameQuality(poses, { sport, cameraAspect } = {}) {
   const feetVis =
     (ankleL?.visibility ?? 0) > 0.4 || (ankleR?.visibility ?? 0) > 0.4;
   if (sport === "swimming") {
-    const coreIndices = [11, 12, 15, 16, 23, 24];
+    const coreIndices = [11, 12, 13, 14, 15, 16];
     const visibleCore = coreIndices.filter(
-      (index) => (primary[index]?.visibility ?? 0) > 0.35
+      (index) => (primary[index]?.visibility ?? 0) > 0.18
     ).length;
-    if (visibleCore < 4) {
-      issues.push("Swimmer pose obscured — wait until shoulders and hips are visible");
+    const visibleShoulders = [11, 12].filter(
+      (index) => (primary[index]?.visibility ?? 0) > 0.18
+    ).length;
+    if (visibleShoulders < 1 || visibleCore < 3) {
+      issues.push("Arm pose obscured — tracking box remains locked");
     }
   } else {
     if (!headVis) issues.push("Head out of frame — tilt camera up");
@@ -33,7 +36,10 @@ export function assessFrameQuality(poses, { sport, cameraAspect } = {}) {
 
   let visSum = 0;
   let visN = 0;
-  for (const point of primary) {
+  const visibilityPoints = sport === "swimming"
+    ? [11, 12, 13, 14, 15, 16].map((index) => primary[index])
+    : primary;
+  for (const point of visibilityPoints) {
     if (point?.visibility != null) {
       visSum += point.visibility;
       visN += 1;
@@ -61,10 +67,10 @@ export function assessFrameQuality(poses, { sport, cameraAspect } = {}) {
     }
   }
 
-  const hipL = primary[23];
-  const hipR = primary[24];
-  if (hipL && hipR) {
-    const cx = (hipL.x + hipR.x) / 2;
+  const centerLeft = sport === "swimming" ? primary[11] : primary[23];
+  const centerRight = sport === "swimming" ? primary[12] : primary[24];
+  if (centerLeft && centerRight) {
+    const cx = (centerLeft.x + centerRight.x) / 2;
     if (cx < 0.1) issues.push("Athlete near left edge");
     else if (cx > 0.9) issues.push("Athlete near right edge");
   }

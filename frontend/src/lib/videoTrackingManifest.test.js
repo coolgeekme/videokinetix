@@ -1,15 +1,20 @@
 import {
   buildTrackingManifest,
   captureManifestFrames,
+  lookupManifestFrame,
   lookupManifestTracks,
+  linkSwimmingDetections,
+  manifestHasPoseForTrack,
   planManifestTimestamps,
+  UNDERWATER_POSE_CROP_TOP,
 } from "./videoTrackingManifest";
 
 function fakeCanvas(width, height) {
+  const context = { drawImage: jest.fn() };
   return {
     width,
     height,
-    getContext: () => ({ drawImage: jest.fn() }),
+    getContext: () => context,
   };
 }
 
@@ -93,9 +98,77 @@ describe("captureManifestFrames", () => {
     expect(frames[0].detections).toEqual([
       { xyxy: [100, 40, 220, 300], confidence: 0.9 },
     ]);
+    expect(frames[0].poses).toEqual([]);
     // MediaPipe VIDEO mode timestamps must strictly increase call over call.
     const poseTimestamps = poseLandmarker.detectForVideo.mock.calls.map((call) => call[1]);
     expect(poseTimestamps).toEqual([1, 2, 3]);
+  });
+
+  test("uses shared monotonic clocks when MediaPipe graphs are reused by the canvas", async () => {
+    const video = fakeVideo({ duration: 1 });
+    video.addEventListener = (event, handler) => {
+      Promise.resolve().then(handler);
+    };
+    const canvas = fakeCanvas(640, 360);
+    const personDetector = { detectForVideo: jest.fn().mockReturnValue({ detections: [] }) };
+    const poseLandmarker = { detectForVideo: jest.fn().mockReturnValue({ landmarks: [] }) };
+    let poseClock = 54126.7;
+    let personClock = 78000;
+    const nextPoseTimestamp = jest.fn(() => (poseClock += 0.01));
+    const nextPersonTimestamp = jest.fn(() => (personClock += 0.01));
+
+    await captureManifestFrames({
+      video,
+      canvas,
+      personDetector,
+      poseLandmarker,
+      sport: "swimming",
+      timestamps: [0, 0.5, 1],
+      nextPoseTimestamp,
+      nextPersonTimestamp,
+    });
+
+    poseLandmarker.detectForVideo.mock.calls.forEach((call, index) => {
+      expect(call[1]).toBeCloseTo(54126.71 + index * 0.01, 5);
+    });
+    personDetector.detectForVideo.mock.calls.forEach((call, index) => {
+      expect(call[1]).toBeCloseTo(78000.01 + index * 0.01, 5);
+    });
+    expect(nextPoseTimestamp).toHaveBeenCalledTimes(3);
+    expect(nextPersonTimestamp).toHaveBeenCalledTimes(3);
+  });
+
+  test("crops out the water-surface reflection and remaps swimmer poses", async () => {
+    const video = fakeVideo({ duration: 1, videoWidth: 500, videoHeight: 900 });
+    video.addEventListener = (event, handler) => Promise.resolve().then(handler);
+    const canvas = fakeCanvas(500, 900);
+    const underwaterPoseCanvas = fakeCanvas(500, 900);
+    const swimmerPose = Array.from({ length: 33 }, () => ({
+      x: 0.5,
+      y: 0.5,
+      visibility: 0.9,
+    }));
+    const personDetector = { detectForVideo: jest.fn().mockReturnValue({ detections: [] }) };
+    const poseLandmarker = {
+      detectForVideo: jest.fn().mockReturnValue({ landmarks: [swimmerPose] }),
+    };
+
+    const frames = await captureManifestFrames({
+      video,
+      canvas,
+      underwaterPoseCanvas,
+      personDetector,
+      poseLandmarker,
+      sport: "swimming",
+      timestamps: [0],
+    });
+
+    expect(poseLandmarker.detectForVideo).toHaveBeenCalledWith(underwaterPoseCanvas, 1);
+    expect(frames[0].poses[0][0].y).toBeCloseTo(
+      UNDERWATER_POSE_CROP_TOP + 0.5 * (1 - UNDERWATER_POSE_CROP_TOP),
+      5
+    );
+    expect(underwaterPoseCanvas.getContext("2d").drawImage).toHaveBeenCalled();
   });
 
   test("stops early once the caller's abort signal fires", async () => {
@@ -171,13 +244,53 @@ describe("buildTrackingManifest", () => {
     expect(video.currentTime).toBeCloseTo(0.15, 5);
     expect(video.play).toHaveBeenCalled();
   });
+
+  test("resolves swimming identities locally without the slow batch request", async () => {
+    const video = autoSeek(fakeVideo({ duration: 0.2 }));
+    const personDetector = {
+      detectForVideo: jest.fn().mockReturnValue({ detections: [] }),
+    };
+    const poseLandmarker = {
+      detectForVideo: jest.fn().mockReturnValue({ landmarks: [] }),
+    };
+    const apiClient = { post: jest.fn() };
+
+    const manifest = await buildTrackingManifest({
+      video,
+      personDetector,
+      poseLandmarker,
+      sport: "swimming",
+      apiClient,
+      canvasFactory: () => fakeCanvas(640, 360),
+    });
+
+    expect(manifest.length).toBeGreaterThan(1);
+    expect(apiClient.post).not.toHaveBeenCalled();
+  });
+});
+
+describe("linkSwimmingDetections", () => {
+  test("keeps one swimmer ID through missing frames and rapid approach scale", () => {
+    const detection = (xyxy) => ({ xyxy, confidence: 0.9 });
+    const frames = [
+      { detections: [detection([440, 360, 520, 460])] },
+      { detections: [] },
+      { detections: [] },
+      { detections: [detection([360, 280, 620, 650])] },
+    ];
+
+    const linked = linkSwimmingDetections(frames, 1000, 1000, 5);
+
+    expect(linked[0][0].tracker_id).toBe(linked[3][0].tracker_id);
+    expect(linked[0][0].confirmed).toBe(true);
+  });
 });
 
 describe("lookupManifestTracks", () => {
   const manifest = [
-    { timestamp: 0, tracks: ["a"] },
-    { timestamp: 1, tracks: ["b"] },
-    { timestamp: 2, tracks: ["c"] },
+    { timestamp: 0, tracks: ["a"], poses: ["pose-a"] },
+    { timestamp: 1, tracks: ["b"], poses: ["pose-b"] },
+    { timestamp: 2, tracks: ["c"], poses: ["pose-c"] },
   ];
 
   test("returns the nearest sample's tracks", () => {
@@ -190,5 +303,35 @@ describe("lookupManifestTracks", () => {
   test("returns null for an empty manifest", () => {
     expect(lookupManifestTracks([], 1)).toBeNull();
     expect(lookupManifestTracks(null, 1)).toBeNull();
+  });
+
+  test("returns the complete nearest frame for synchronized pose playback", () => {
+    expect(lookupManifestFrame(manifest, 0.9)).toEqual(manifest[1]);
+    expect(lookupManifestFrame([], 1)).toBeNull();
+  });
+
+  test("requires the selected track to contain a manifest pose", () => {
+    const makePose = (x, y) => Array.from({ length: 33 }, () => ({
+      x,
+      y,
+      visibility: 0.9,
+    }));
+    const selectedPose = makePose(0.3, 0.65);
+    const otherPose = makePose(0.8, 0.65);
+    const frame = {
+      timestamp: 0,
+      tracks: [{ id: 7, x1: 0.15, y1: 0.4, x2: 0.45, y2: 0.9 }],
+      poses: [otherPose],
+    };
+    const centerForPose = (pose) => pose?.[23]
+      ? { x: pose[23].x, y: pose[23].y }
+      : null;
+
+    expect(manifestHasPoseForTrack(frame, 7, centerForPose)).toBe(false);
+    frame.poses = [selectedPose];
+    expect(manifestHasPoseForTrack(frame, 7, centerForPose)).toBe(true);
+    expect(
+      manifestHasPoseForTrack({ ...frame, poses: [] }, 7, centerForPose)
+    ).toBe(false);
   });
 });
