@@ -305,6 +305,9 @@ export default function PoseCanvas({
   const [posePending, setPosePending] = useState(false);
   const [personCount, setPersonCount] = useState(0);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
+  // Visible (no devtools needed) readout of why recording captured zero
+  // usable frames -- set once per capture the first time that happens.
+  const [recordingDiagnostic, setRecordingDiagnostic] = useState(null);
   const lastQualityUpdateRef = useRef(0);
 
   // Basketball: ball trajectory + hoop ROI for make/miss detection
@@ -1158,6 +1161,10 @@ export default function PoseCanvas({
           tracking_source: enhancedTrackingFresh ? "botsort" : "pose",
           tracking_confidence: selectedEnhancedTrack?.confidence ?? null,
         });
+        // A usable frame landed -- any earlier "no pose yet" diagnostic no
+        // longer reflects the current state. setState(null) is a no-op via
+        // Object.is when it's already null, so this is safe to call per-frame.
+        setRecordingDiagnostic(null);
         if (mode === "live" && Date.now() - lastThumbAtRef.current > 200) {
           lastThumbAtRef.current = Date.now();
           try {
@@ -1200,11 +1207,12 @@ export default function PoseCanvas({
         });
         if (!captureIdentitySeenRef.current && !emptyFrameDiagnosticLoggedRef.current) {
           // Recording started but never captured one usable landmark frame.
-          // Logged once per capture so a "no reps counted" report has enough
-          // signal (without asking the user to reproduce with devtools open)
-          // to tell whether identity, appearance, or the ROI scan is at fault.
+          // Surfaced on-screen (not just console) once per capture so a "no
+          // reps counted" report comes with enough signal to tell whether
+          // identity, appearance, or the ROI scan is at fault -- without
+          // needing devtools access.
           emptyFrameDiagnosticLoggedRef.current = true;
-          console.warn("[PoseCanvas] recording has not captured a usable pose yet", {
+          const diagnosticDetail = {
             targetIdx,
             hasSelectedEnhancedTrack: Boolean(selectedEnhancedTrack),
             targetTrackId: targetTrackIdRef.current,
@@ -1213,7 +1221,25 @@ export default function PoseCanvas({
             awaitingRewindReacquire: awaitingRewindReacquireRef.current,
             poseCount: poses.length,
             galleryDescriptors: targetAppearanceGalleryRef.current.length,
-          });
+          };
+          console.warn(
+            "[PoseCanvas] recording has not captured a usable pose yet",
+            diagnosticDetail
+          );
+          const reason = !poses.length
+            ? "no pose detected in frame"
+            : !selectedEnhancedTrack && targetTrackIdRef.current == null
+              ? "no identity anchor (no BoT-SORT/manifest track and no local pose track)"
+              : targetUsesRoiRef.current && !selectedEnhancedTrack
+                ? "close-up scan found people but couldn't match the locked swimmer"
+                : !targetAppearanceGalleryRef.current.length
+                  ? "no appearance reference captured at selection time"
+                  : "pose found but failed identity/appearance verification";
+          setRecordingDiagnostic(
+            `No usable pose yet — ${reason} (poses seen: ${poses.length}, ` +
+            `enhanced track: ${selectedEnhancedTrackIdRef.current ?? "none"}, ` +
+            `local track: ${targetTrackIdRef.current ?? "none"})`
+          );
         }
       }
     },
@@ -1273,6 +1299,7 @@ export default function PoseCanvas({
     setFindingAthlete(false);
     setTrackingLost(false);
     setPosePending(false);
+    setRecordingDiagnostic(null);
     setPersonCount(0);
     setHoopRoi(null);
     setPlacementStep("athlete");
@@ -2982,6 +3009,7 @@ export default function PoseCanvas({
     setHasTarget(false);
     setTrackingLost(false);
     setPosePending(false);
+    setRecordingDiagnostic(null);
     setPlacementStep("athlete");
     hoopTemplateRef.current = null;
     hoopRoiRef.current = null;
@@ -3188,6 +3216,7 @@ export default function PoseCanvas({
     setError(null);
     setTrackingLost(false);
     setPosePending(false);
+    setRecordingDiagnostic(null);
     captureIdentitySeenRef.current = false;
     emptyFrameDiagnosticLoggedRef.current = false;
     framesRef.current = [];
@@ -3775,6 +3804,19 @@ export default function PoseCanvas({
               {sport === "swimming"
                 ? "Swimmer identity lost — motion capture paused"
                 : "Selected athlete lost — analysis paused"}
+            </div>
+          </div>
+        )}
+
+        {/* On-screen recording diagnostic — no devtools needed to report why
+            a capture recorded zero usable frames. */}
+        {running && recordingDiagnostic && (
+          <div
+            data-testid="recording-diagnostic"
+            className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/90 backdrop-blur border border-[#ff3b30]/60 px-4 py-2 text-center pointer-events-none max-w-[90%]"
+          >
+            <div className="text-[10px] font-mono text-[#ff3b30] break-words">
+              {recordingDiagnostic}
             </div>
           </div>
         )}
