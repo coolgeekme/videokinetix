@@ -515,7 +515,7 @@ async def reanalyze_session(
     analysis = await analyze_form(s["sport"], pose_summary, notes=s.get("notes"))
     update = {
         "analysis": analysis,
-        "form_score": int(analysis.get("form_score", 70)),
+        "form_score": _score_of(analysis),
     }
     await db.sessions.update_one({"id": session_id, "user_id": user_id}, {"$set": update})
     return update
@@ -787,7 +787,7 @@ async def dashboard_overview(user_id: str = Depends(get_current_user_id)):
     timeline = [
         {
             "date": s["created_at"][:10],
-            "score": s.get("form_score", 0),
+            "score": _score_of(s),
             "sport": s["sport"],
             "session_id": s["id"],
             "athlete_id": s.get("athlete_id"),
