@@ -2,6 +2,13 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
 import { assessFrameQuality } from "../lib/frameQuality";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
+import {
+  createTrackingState,
+  primeTarget,
+  resolveTarget,
+  rankSelectionCandidates,
+  trackingBadge,
+} from "../lib/targetTracking";
 
 // MediaPipe BlazePose body skeleton connections (indices >= 11 only)
 const POSE_CONNECTIONS = [
@@ -16,9 +23,10 @@ const PERSON_COLORS = ["#7dd3fc", "#fbbf24", "#c084fc", "#f472b6", "#94a3b8"];
 const TARGET_COLOR = "#00ff88"; // green = currently tracked
 const JOINT_COLOR_TARGET = "#ff3b30";
 
-// Tracking thresholds (normalized 0-1 coordinates)
-const TRACKING_DISTANCE_THRESHOLD = 0.18;
-const TRACKING_LOST_GRACE_MS = 1500;
+// Tracking thresholds previously lived here (nearest-neighbour distance gate and
+// a lost-tracking grace period). Identity resolution now lives in
+// lib/targetTracking, which replaced the fixed gate with a motion-scaled one and
+// added reflection rejection — see that module's header for the rationale.
 
 let landmarkerLoaderPromise = null;
 async function loadPoseLandmarker() {
@@ -82,13 +90,6 @@ async function loadBallDetector() {
   return ballDetectorLoaderPromise;
 }
 
-function hipCenter(lm) {
-  const lh = lm[23];
-  const rh = lm[24];
-  if (!lh || !rh) return null;
-  return { x: (lh.x + rh.x) / 2, y: (lh.y + rh.y) / 2 };
-}
-
 function dist2D(a, b) {
   if (!a || !b) return Infinity;
   return Math.hypot(a.x - b.x, a.y - b.y);
@@ -134,12 +135,22 @@ export default function PoseCanvas({
   const startedAtRef = useRef(null);
   const runningRef = useRef(false);
 
-  // Latest detected poses + target tracking
+  // Latest detected poses + target tracking.
+  // Identity resolution lives in lib/targetTracking (motion-gated adoption around
+  // a coasted anchor, hysteresis, and a vertical-geometry test that refuses a
+  // pose which is a mirror image of the tracked subject). See that module for
+  // why plain nearest-neighbour matching loses the lock to a water-surface
+  // reflection on underwater footage.
   const lastPosesRef = useRef([]); // current frame's poses
   const targetAnchorRef = useRef(null); // {x, y} hip center of locked target
+  const trackingStateRef = useRef(createTrackingState());
   const lastSeenAtRef = useRef(null); // timestamp last frame target was matched
+  const waterlineRef = useRef(null); // normalized y of the water surface (swimming)
   const [hasTarget, setHasTarget] = useState(false);
   const [trackingLost, setTrackingLost] = useState(false);
+  const [trackBadge, setTrackBadge] = useState(null);
+  const trackBadgeLabelRef = useRef(null);
+  const [tapNotice, setTapNotice] = useState(null);
   const [personCount, setPersonCount] = useState(0);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
   const lastQualityUpdateRef = useRef(0);
@@ -180,7 +191,11 @@ export default function PoseCanvas({
   const [ballCount, setBallCount] = useState(0);
   const [hasBallPref, setHasBallPref] = useState(false);
   const [hoopRoi, setHoopRoi] = useState(null); // {x, y, w, h} normalized
-  const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'ready'
+  // Swimming only: normalized y of the water surface. Lets the tracker treat the
+  // reflective side of the frame as a hard reject. Optional — auto-detection of
+  // mirror-image pose pairs covers the case where the user skips it.
+  const [waterline, setWaterline] = useState(null);
+  const [placementStep, setPlacementStep] = useState("athlete"); // 'athlete' | 'hoop' | 'waterline' | 'ready'
   const [liveMakes, setLiveMakes] = useState(0);
   const [liveAttempts, setLiveAttempts] = useState(0);
   const liveShotStateRef = useRef({
@@ -195,6 +210,11 @@ export default function PoseCanvas({
   useEffect(() => {
     hoopRoiRef.current = hoopRoi;
   }, [hoopRoi]);
+
+  // Keep waterlineRef in sync with state (read from the rAF loop)
+  useEffect(() => {
+    waterlineRef.current = waterline;
+  }, [waterline]);
 
   // Ball preference memory: keyed per athlete (and "default" fallback).
   const ballPrefKey = `vk_ballpref_${athleteId || "default"}`;
@@ -377,34 +397,32 @@ export default function PoseCanvas({
         setFrameQuality(assessFrameQuality(poses, { sport }));
       }
 
-      // Identify which detected pose is "the target" via nearest-neighbour tracking
-      let targetIdx = -1;
-      if (poses.length > 0) {
-        if (targetAnchorRef.current) {
-          let bestDist = Infinity;
-          poses.forEach((lm, i) => {
-            const c = hipCenter(lm);
-            const d = dist2D(c, targetAnchorRef.current);
-            if (d < bestDist) {
-              bestDist = d;
-              targetIdx = i;
-            }
-          });
-          // Use a more permissive threshold while recording — fast-moving
-          // athletes can travel a long way between detection ticks. As long as
-          // we have a pose, we update the anchor so it follows the motion.
-          // Single-pose case (poses.length === 1) is the dominant scenario for
-          // most users and we should always adopt it.
-          const adoptThreshold = runningRef.current
-            ? TRACKING_DISTANCE_THRESHOLD * 3 // relaxed during recording
-            : TRACKING_DISTANCE_THRESHOLD;
-          if (bestDist > adoptThreshold && poses.length > 1) {
-            targetIdx = -1;
-          } else {
-            targetAnchorRef.current = hipCenter(poses[targetIdx]);
-            lastSeenAtRef.current = Date.now();
-          }
-        }
+      // Identify which detected pose is "the target". Resolution is delegated to
+      // lib/targetTracking: adoption is gated around a coasted anchor, an
+      // isolated pose is never adopted just because it is the only one on
+      // screen, and a candidate whose vertical joint geometry is anti-correlated
+      // with the tracked subject (i.e. a mirror image) is refused. The previous
+      // inline rule — nearest hip centre, adopting a lone pose unconditionally —
+      // is what let the water surface's reflection steal the lock underwater.
+      const trackNow = performance.now();
+      const tracking = resolveTarget({
+        poses,
+        state: trackingStateRef.current,
+        nowMs: trackNow,
+        waterline: waterlineRef.current,
+        running: runningRef.current,
+      });
+      trackingStateRef.current = tracking.state;
+      const targetIdx = tracking.targetIdx;
+      if (tracking.state.anchor) targetAnchorRef.current = tracking.state.anchor;
+      if (targetIdx !== -1) lastSeenAtRef.current = trackNow;
+      const badge = trackingBadge({
+        status: tracking.status,
+        misses: tracking.state.misses,
+      });
+      if (badge.label !== trackBadgeLabelRef.current) {
+        trackBadgeLabelRef.current = badge.label;
+        setTrackBadge(badge);
       }
 
       // Draw all poses; highlight the target
@@ -472,6 +490,31 @@ export default function PoseCanvas({
         ctx.textAlign = "left";
         ctx.textBaseline = "top";
         ctx.fillText("HOOP", hoop.x * w + 4, hoop.y * h + 4);
+        ctx.restore();
+      }
+
+      // Draw the water surface line (swimming). The tracker treats the side
+      // above it as reflective, so the pose there is the mirror image of the
+      // swimmer and must not be adopted as the target.
+      const wlNorm = waterlineRef.current;
+      if (typeof wlNorm === "number") {
+        ctx.save();
+        ctx.strokeStyle = "#00e5ff";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([10, 6]);
+        ctx.shadowColor = "#00e5ff";
+        ctx.shadowBlur = 8;
+        ctx.beginPath();
+        ctx.moveTo(0, wlNorm * h);
+        ctx.lineTo(w, wlNorm * h);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "#00e5ff";
+        ctx.font = "bold 11px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText("WATER LINE", 4, wlNorm * h - 4);
         ctx.restore();
       }
 
@@ -559,35 +602,12 @@ export default function PoseCanvas({
         ctx.restore();
       }
 
-      // Tracking-lost detection
-      if (targetAnchorRef.current && targetIdx === -1) {
-        if (
-          lastSeenAtRef.current &&
-          Date.now() - lastSeenAtRef.current > TRACKING_LOST_GRACE_MS
-        ) {
-          if (!trackingLost) setTrackingLost(true);
-          // try to re-lock onto closest pose to last anchor (relax threshold)
-          if (poses.length > 0) {
-            let bestDist = Infinity;
-            let bestIdx = -1;
-            poses.forEach((lm, i) => {
-              const c = hipCenter(lm);
-              const d = dist2D(c, targetAnchorRef.current);
-              if (d < bestDist) {
-                bestDist = d;
-                bestIdx = i;
-              }
-            });
-            if (bestIdx >= 0) {
-              targetAnchorRef.current = hipCenter(poses[bestIdx]);
-              lastSeenAtRef.current = Date.now();
-              setTrackingLost(false);
-            }
-          }
-        }
-      } else if (trackingLost && targetIdx !== -1) {
-        setTrackingLost(false);
-      }
+      // Surface tracker state to the UI. Identity itself is already handled by
+      // the resolver: it coasts the anchor through detection dropouts instead of
+      // re-locking onto whatever pose happens to be nearest — which is precisely
+      // how the old code ended up permanently pinned to the reflection.
+      const isLostNow = tracking.status === "lost";
+      if (isLostNow !== trackingLost) setTrackingLost(isLostNow);
 
       // Recording: only record the target's landmarks
       if (
@@ -642,6 +662,7 @@ export default function PoseCanvas({
   /* ---------------- Reset target tracking when video source changes ---------------- */
   useEffect(() => {
     targetAnchorRef.current = null;
+    trackingStateRef.current = createTrackingState();
     lastSeenAtRef.current = null;
     lastPosesRef.current = [];
     ballFramesRef.current = [];
@@ -662,8 +683,13 @@ export default function PoseCanvas({
     };
     setHasTarget(false);
     setTrackingLost(false);
+    setTrackBadge(null);
+    trackBadgeLabelRef.current = null;
+    setTapNotice(null);
     setPersonCount(0);
     setHoopRoi(null);
+    setWaterline(null);
+    waterlineRef.current = null;
     setPlacementStep("athlete");
     setLiveMakes(0);
     setLiveAttempts(0);
@@ -1267,6 +1293,15 @@ export default function PoseCanvas({
       return;
     }
 
+    // Optional (swimming): tap the water surface line. Everything above it is the
+    // mirrored image of the pool, so the tracker hard-rejects poses there. This is
+    // skippable — the flip test still catches the reflection without it.
+    if (placementStep === "waterline") {
+      setWaterline(Math.max(0.05, Math.min(0.95, click.y)));
+      setPlacementStep("ready");
+      return;
+    }
+
     // Basketball — when hoop is placed and multiple balls are visible,
     // the user can tap a ball to lock tracking onto it. Check ball-tap
     // BEFORE athlete-tap because balls are smaller/higher targets.
@@ -1300,46 +1335,59 @@ export default function PoseCanvas({
       }
     }
 
-    // Step 1: pick athlete by tap-nearest pose
+    // Step 1: pick the athlete by tap-nearest pose. Ranking is confidence-aware
+    // and reflection-aware: when a tap is ambiguous between two poses that look
+    // like each other's vertical mirror (swimmer + water-surface reflection), the
+    // higher-confidence pose wins and the user is told what happened.
     const poses = lastPosesRef.current;
     if (!poses.length) return;
-    let bestIdx = -1;
-    let bestDist = Infinity;
-    poses.forEach((lm, i) => {
-      const pts = [11, 12, 23, 24].map((k) => lm[k]).filter(Boolean);
-      if (!pts.length) return;
-      const cx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-      const cy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
-      const d = dist2D({ x: cx, y: cy }, click);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
+    const ranked = rankSelectionCandidates({
+      poses,
+      point: click,
+      config: { tapRadius: 0.4 / zoom },
     });
-    // Click radius scales inversely with zoom but is generous on mobile —
-    // the original 0.25 was too tight on small screens. 0.4 = nearly half
-    // the canvas width, but bestDist comparison still picks the closest pose.
-    if (bestIdx >= 0 && bestDist < 0.4 / zoom) {
-      const c = hipCenter(poses[bestIdx]);
-      if (c) {
-        targetAnchorRef.current = c;
-        lastSeenAtRef.current = Date.now();
-        setHasTarget(true);
-        setTrackingLost(false);
-        // Basketball: prompt the user to place the hoop next
-        setPlacementStep(sport === "basketball" ? "hoop" : "ready");
-      }
+    if (ranked.selection && ranked.withinTapRadius) {
+      const pickedIndex = ranked.selection.index;
+      trackingStateRef.current = primeTarget(
+        trackingStateRef.current,
+        poses[pickedIndex],
+        performance.now(),
+        waterlineRef.current
+      );
+      targetAnchorRef.current = trackingStateRef.current.anchor;
+      lastSeenAtRef.current = performance.now();
+      setHasTarget(true);
+      setTrackingLost(false);
+      setTapNotice(
+        ranked.mirrorPairs.length
+          ? "Reflection in frame — locked the clearer pose. Tap the swimmer again if that was the wrong one."
+          : null
+      );
+      // Basketball then places the hoop; swimming optionally marks the water line.
+      setPlacementStep(
+        sport === "basketball" ? "hoop" : sport === "swimming" ? "waterline" : "ready"
+      );
     }
   };
 
   const clearTarget = () => {
     if (running) return;
     targetAnchorRef.current = null;
+    trackingStateRef.current = createTrackingState();
     lastSeenAtRef.current = null;
     setHasTarget(false);
     setTrackingLost(false);
+    setTrackBadge(null);
+    trackBadgeLabelRef.current = null;
+    setTapNotice(null);
     setPlacementStep("athlete");
     setHoopRoi(null);
+  };
+
+  const clearWaterline = () => {
+    if (running) return;
+    setWaterline(null);
+    waterlineRef.current = null;
   };
 
   const clearHoop = () => {
@@ -1494,6 +1542,15 @@ export default function PoseCanvas({
     runningRef.current = true;
     setRunning(true);
     setStatus("running");
+    setTapNotice(null);
+    // The resolver tracks its own recency; re-stamp it so the first detection
+    // during recording isn't treated as a stale, long-coasted anchor.
+    trackingStateRef.current = {
+      ...trackingStateRef.current,
+      t: performance.now(),
+      missSince: null,
+      misses: 0,
+    };
 
     // Phase C: kick off MediaRecorders if user opted in to save the video.
     if (saveVideo) {
@@ -1793,10 +1850,77 @@ export default function PoseCanvas({
           </div>
         )}
         {hasTarget && running && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-black/70 backdrop-blur px-3 py-1.5 border border-[#00ff88]/40 pointer-events-none">
-            <Target className="w-3 h-3 text-[#00ff88]" />
-            <span className="text-[11px] font-display uppercase tracking-widest font-bold text-[#00ff88]">
-              Tracking
+          <div
+            data-testid="tracking-status-pill"
+            className={`absolute top-3 left-1/2 -translate-x-1/2 flex items-center gap-2 backdrop-blur px-3 py-1.5 border pointer-events-none ${
+              trackBadge?.level === "warn"
+                ? "bg-[#ffab00]/15 border-[#ffab00]/50"
+                : trackBadge?.level === "poor"
+                  ? "bg-[#ff3b30]/15 border-[#ff3b30]/50"
+                  : "bg-black/70 border-[#00ff88]/40"
+            }`}
+          >
+            <Target
+              className={`w-3 h-3 ${
+                trackBadge?.level === "warn"
+                  ? "text-[#ffab00]"
+                  : trackBadge?.level === "poor"
+                    ? "text-[#ff3b30]"
+                    : "text-[#00ff88]"
+              }`}
+            />
+            <span
+              className={`text-[11px] font-display uppercase tracking-widest font-bold ${
+                trackBadge?.level === "warn"
+                  ? "text-[#ffab00]"
+                  : trackBadge?.level === "poor"
+                    ? "text-[#ff3b30]"
+                    : "text-[#00ff88]"
+              }`}
+            >
+              {trackBadge?.label || "Tracking"}
+            </span>
+          </div>
+        )}
+
+        {/* Swimming: water-line control. Placed before recording so a surface
+            reflection (the swimmer's mirror image) is rejected outright. */}
+        {sport === "swimming" && !running && hasTarget && (
+          <div
+            data-testid="waterline-pill"
+            className="absolute top-3 right-3 flex items-center gap-2 bg-black/70 backdrop-blur px-2.5 py-1.5 border border-[#00e5ff]/40"
+          >
+            <span className="text-[10px] font-display uppercase tracking-widest font-bold text-[#00e5ff]">
+              {waterline == null ? "Water line: off" : "Water line set"}
+            </span>
+            <button
+              onClick={() => setPlacementStep("waterline")}
+              data-testid="set-waterline-btn"
+              className="text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white"
+            >
+              {waterline == null ? "set" : "move"}
+            </button>
+            {waterline != null && (
+              <button
+                onClick={clearWaterline}
+                data-testid="clear-waterline-btn"
+                className="text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white"
+              >
+                clear
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Post-selection notice: tells the user when the tap was ambiguous
+            between the swimmer and its reflection. */}
+        {!running && tapNotice && (
+          <div
+            data-testid="tap-notice"
+            className="absolute top-[5.5rem] left-1/2 -translate-x-1/2 max-w-[90%] bg-[#ffab00]/15 backdrop-blur border border-[#ffab00]/50 px-3 py-1.5 text-center pointer-events-none"
+          >
+            <span className="text-[10px] sm:text-[11px] font-display uppercase tracking-widest font-bold text-[#ffab00]">
+              {tapNotice}
             </span>
           </div>
         )}
@@ -1820,8 +1944,22 @@ export default function PoseCanvas({
                 ? personCount === 0
                   ? "Position athlete in frame"
                   : `Tap athlete (${personCount})`
-                : "Tap the rim"}
+                : placementStep === "hoop"
+                  ? "Tap the rim"
+                  : "Tap the water line (optional)"}
             </div>
+            {placementStep === "waterline" && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPlacementStep("ready");
+                }}
+                data-testid="skip-waterline-btn"
+                className="pointer-events-auto text-[10px] uppercase tracking-widest text-zinc-400 hover:text-white ml-1"
+              >
+                skip
+              </button>
+            )}
           </div>
         )}
 
