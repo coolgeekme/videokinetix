@@ -241,7 +241,9 @@ Return ONLY this JSON:
     except Exception as e:
         logger.exception("Failed to parse AI form analysis: %s", e)
         result = {
-            "form_score": overall if isinstance(overall, int) else 70,
+            # No invented score: either we have the computed rep average or the
+            # session genuinely has no measurement (see captureQuality.js).
+            "form_score": overall if isinstance(overall, int) else None,
             "summary": "Analysis pending detailed review.",
             "strengths": ["Consistent posture detected"],
             "improvements": [],

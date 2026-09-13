@@ -284,8 +284,9 @@ async def list_athletes(user_id: str = Depends(get_current_user_id)):
             {"user_id": user_id, "athlete_id": a["id"]}, {"_id": 0, "form_score": 1, "sport": 1}
         ).to_list(1000)
         total = len(sessions)
-        avg = round(sum(s.get("form_score", 0) for s in sessions) / total, 1) if total else 0
-        best = max((s.get("form_score", 0) for s in sessions), default=0)
+        scores = [x for x in (_score_of(s) for s in sessions) if x is not None]
+        avg = round(sum(scores) / len(scores), 1) if scores else 0
+        best = max(scores, default=0)
         by_sport_count: dict[str, int] = {}
         for s in sessions:
             by_sport_count[s["sport"]] = by_sport_count.get(s["sport"], 0) + 1
@@ -347,13 +348,14 @@ async def athlete_stats(
         q["sport"] = sport
     sessions = await db.sessions.find(q, {"_id": 0}).sort("created_at", 1).to_list(1000)
     total = len(sessions)
-    avg = round(sum(s.get("form_score", 0) for s in sessions) / total, 1) if total else 0
-    best = max((s.get("form_score", 0) for s in sessions), default=0)
+    scores = [x for x in (_score_of(s) for s in sessions) if x is not None]
+    avg = round(sum(scores) / len(scores), 1) if scores else 0
+    best = max(scores, default=0)
     by_sport: dict[str, int] = {}
     for s in sessions:
         by_sport[s["sport"]] = by_sport.get(s["sport"], 0) + 1
     timeline = [
-        {"date": s["created_at"][:10], "score": s.get("form_score", 0), "sport": s["sport"], "session_id": s["id"]}
+        {"date": s["created_at"][:10], "score": _score_of(s), "sport": s["sport"], "session_id": s["id"]}
         for s in sessions
     ]
     streak = await _compute_streak(q)
@@ -419,13 +421,29 @@ async def create_session(req: SessionCreate, user_id: str = Depends(get_current_
         "player_slot": req.player_slot,
         "notes": req.notes,
         "analysis": analysis,
-        "form_score": int(analysis.get("form_score", 70)),
+        "form_score": _score_of(analysis),
         "created_at": now_iso(),
         "training_plan": None,
     }
     await db.sessions.insert_one(doc)
     doc.pop("_id", None)
     return doc
+
+
+def _score_of(doc: dict | None) -> int | None:
+    """Form score as an int, or None when the capture was never analysable.
+
+    A session can legitimately have no score: the capture-quality guard
+    (frontend lib/captureQuality.js) refuses to analyse footage in which the
+    athlete was never reliably detected, so there is nothing to score. None must
+    be SKIPPED by aggregates rather than coalesced to 0 — counting an unmeasured
+    clip as a zero would drag an athlete's average down for footage that was
+    never measured in the first place.
+    """
+    v = (doc or {}).get("form_score")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return int(v)
 
 
 @api.get("/sessions")
@@ -728,8 +746,9 @@ async def dashboard_overview(user_id: str = Depends(get_current_user_id)):
     athlete_map = {a["id"]: a for a in athletes}
 
     total = len(sessions)
-    avg = round(sum(s.get("form_score", 0) for s in sessions) / total, 1) if total else 0
-    best = max((s.get("form_score", 0) for s in sessions), default=0)
+    scores = [x for x in (_score_of(s) for s in sessions) if x is not None]
+    avg = round(sum(scores) / len(scores), 1) if scores else 0
+    best = max(scores, default=0)
     by_sport: dict[str, int] = {}
     for s in sessions:
         by_sport[s["sport"]] = by_sport.get(s["sport"], 0) + 1
@@ -750,8 +769,9 @@ async def dashboard_overview(user_id: str = Depends(get_current_user_id)):
                 "last_session_date": None,
             })
             continue
-        a_avg = round(sum(s["form_score"] for s in a_sessions) / len(a_sessions), 1)
-        a_best = max(s["form_score"] for s in a_sessions)
+        a_scores = [x for x in (_score_of(s) for s in a_sessions) if x is not None]
+        a_avg = round(sum(a_scores) / len(a_scores), 1) if a_scores else 0
+        a_best = max(a_scores, default=0)
         last_date = max(s["created_at"] for s in a_sessions)
         leaderboard.append({
             "athlete_id": a["id"],

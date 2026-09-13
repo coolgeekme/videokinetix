@@ -138,14 +138,16 @@ export default function Sessions() {
                 <div className="flex items-center gap-5">
                   <div
                     className={`font-display font-black text-3xl w-16 ${
-                      s.form_score >= 80
-                        ? "text-[#00ff88]"
-                        : s.form_score >= 60
-                          ? "text-[#ffab00]"
-                          : "text-[#ff3b30]"
+                      s.form_score == null
+                        ? "text-zinc-500"
+                        : s.form_score >= 80
+                          ? "text-[#00ff88]"
+                          : s.form_score >= 60
+                            ? "text-[#ffab00]"
+                            : "text-[#ff3b30]"
                     }`}
                   >
-                    {s.form_score}
+                    {s.form_score ?? "—"}
                   </div>
                   <div>
                     <div className="font-display uppercase tracking-tight font-bold text-lg capitalize">
