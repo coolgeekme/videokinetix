@@ -55,16 +55,23 @@ const CAMERA_GUIDES = {
   },
   swimming: {
     label: "Swimming",
-    headline: "Pool-deck side-tracking · waist-up minimum in frame",
+    // Rewritten from measurement: on a real user clip the detector never found
+    // the swimmer once — head-on framing meant the swimmer was out of frame or
+    // too distorted, and the water surface (its reflection of the lane rope)
+    // was the most human-looking thing in shot, so that is what got tracked.
+    // These are the instructions that produce analysable footage.
+    headline: "Side-on at mid-depth · swimmer crossing the middle of the frame",
     live_tips: [
-      "Pool-deck position: walk alongside the athlete or use a tripod on the deck.",
-      "Side-on view captures stroke recovery and high-elbow catch.",
-      "Keep camera height ~2-3 ft above water surface — too high distorts stroke arc.",
-      "Avoid heavy glare on the water; cloudy days or indoor pools work best.",
+      "Film from the side of the lane with the camera at mid-depth. The swimmer should cross the middle of the frame, never swim into the lens.",
+      "Keep the water surface to a thin strip at the top. If the surface fills a third of the shot, its reflection can read as a body to the detector.",
+      "Head-on shots don't work — the swimmer is out of frame or badly distorted for most of the clip, and the surface reflection dominates the frame.",
+      "Once the swimmer is locked, mark the water line. Everything above it is treated as reflection and ignored.",
+      "Keep the camera still (tripod or wall mount). Don't pan or follow the swimmer.",
     ],
     upload_tips: [
       "30-60 seconds of swim is enough — 4-8 stroke cycles.",
       "Trim out turns at the wall (we don't analyze those yet).",
+      "Side-on clips analyse well. Clips shot from the wall as the swimmer comes at the camera usually can't be analysed — you'll get a warning rather than numbers.",
     ],
   },
 };

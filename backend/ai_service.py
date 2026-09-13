@@ -85,15 +85,56 @@ async def analyze_form(sport: str, pose_summary: dict[str, Any], notes: str | No
     consistency = pose_summary.get("consistency")
     has_rich_data = bool(pose_summary.get("reps"))
 
-    if no_reps and not has_rich_data:
-        # fallback for very short captures or detection failures
+    # Capture-quality guard (frontend lib/captureQuality.js). When the tracked
+    # subject was not plausibly an athlete — e.g. the pose detector fabricated
+    # skeletons out of the water surface — refuse the analysis outright instead of
+    # sending garbage geometry to the model. Asking an LLM to coach from that data
+    # is how you get a confident report with invented numbers in it.
+    quality = pose_summary.get("capture_quality") or {}
+    if quality.get("level") == "unusable" or pose_summary.get("unreliable"):
+        reasons = [str(r) for r in (quality.get("reasons") or [])][:4]
+        advice = [str(a) for a in (quality.get("advice") or [])][:3]
+        next_step = advice[0] if advice else (
+            "Recapture side-on, with the athlete crossing the middle of the frame."
+        )
+        summary = (
+            "This clip couldn't be analysed: the athlete was never reliably detected, "
+            "so no form score or stroke metrics are reported."
+        )
+        if reasons:
+            summary = f"{summary} {' '.join(reasons)}"
         return {
-            "form_score": 60,
+            "form_score": None,
+            "reliable": False,
+            "unreliable": True,
+            "summary": summary,
+            "strengths": [],
+            "improvements": [
+                {
+                    "area": "Capture quality",
+                    "issue": reasons[0] if reasons else "Athlete not reliably detected.",
+                    "fix": next_step,
+                    "severity": "high",
+                }
+            ],
+            "elite_comparison": "Not available — no reliable pose data.",
+            "next_focus": next_step,
+            "rep_callouts": [],
+        }
+
+    if no_reps and not has_rich_data:
+        # Nothing analysable. Withhold the score entirely — the previous version
+        # returned a made-up 60, which reads as "we measured this" when nothing
+        # was measured at all.
+        return {
+            "form_score": None,
+            "reliable": False,
             "summary": (
-                f"We couldn't reliably detect distinct {ctx['rep_unit']}s in this capture. "
-                "Try a slightly longer take with the athlete fully in frame, side-on, and well lit."
+                f"We couldn't reliably detect distinct {ctx['rep_unit']}s in this capture, "
+                "so no form score is reported. Recapture with the athlete fully in frame, "
+                "side-on, and well lit."
             ),
-            "strengths": ["Capture pipeline ran end-to-end."],
+            "strengths": [],
             "improvements": [
                 {
                     "area": "Capture quality",

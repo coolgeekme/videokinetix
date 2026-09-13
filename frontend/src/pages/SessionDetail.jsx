@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, API } from "@/lib/api";
 import { errMsg } from "@/lib/api";
-import { ChevronLeft, Sparkles, Loader2, Trash2, FileDown, Video, RotateCw } from "lucide-react";
+import { ChevronLeft, Sparkles, Loader2, Trash2, FileDown, Video, RotateCw, AlertTriangle } from "lucide-react";
 import { toast } from "sonner";
 import { exportNodeToPdf, pdfFilename } from "@/lib/pdfExport";
 
@@ -195,9 +195,15 @@ export default function SessionDetail() {
     );
 
   const a = session.analysis || {};
-  const score = session.form_score;
+  // A capture the pose guard rejected (lib/captureQuality.js). The backend also
+  // flags this, so either source is enough — and the score is withheld rather
+  // than shown, because a number here would be invented.
+  const quality =
+    session.pose_summary?.capture_quality || session.capture_quality || null;
+  const unreliable = !!(a.unreliable || session.pose_summary?.unreliable || quality?.level === "unusable");
+  const score = unreliable ? null : session.form_score;
   const scoreColor =
-    score >= 80 ? "#00ff88" : score >= 60 ? "#ffab00" : "#ff3b30";
+    score == null ? "#71717a" : score >= 80 ? "#00ff88" : score >= 60 ? "#ffab00" : "#ff3b30";
 
   return (
     <div className="space-y-8">
@@ -238,6 +244,45 @@ export default function SessionDetail() {
       </div>
 
       <div ref={reportRef} className="grid lg:grid-cols-3 gap-6">
+        {unreliable && (
+          <div
+            data-testid="unreliable-capture-banner"
+            className="lg:col-span-3 border border-[#ffab00]/50 bg-[#ffab00]/10 p-5"
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-[#ffab00] flex-shrink-0 mt-0.5" />
+              <div className="space-y-2">
+                <div className="text-[11px] uppercase tracking-widest font-display font-bold text-[#ffab00]">
+                  This clip couldn't be analysed
+                </div>
+                <p className="text-sm text-zinc-200">
+                  The athlete was never reliably detected in this footage, so no stroke
+                  numbers are reported — any figure derived from it would have been made up.
+                </p>
+                {quality?.reasons?.length > 0 && (
+                  <ul className="text-xs text-zinc-300 space-y-1 list-none">
+                    {quality.reasons.map((r, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="text-[#ffab00]">·</span>
+                        <span>{r}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {quality?.advice?.length > 0 && (
+                  <ul className="text-xs text-[#00ff88] space-y-1 pt-1 list-none">
+                    {quality.advice.map((r, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span>→</span>
+                        <span>{r}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
         <div className="lg:col-span-1 bg-[#121212] border border-white/10 p-6">
           <div className="text-[11px] uppercase tracking-widest text-zinc-400 font-display font-bold">
             Form score
@@ -256,7 +301,7 @@ export default function SessionDetail() {
             style={{ color: scoreColor }}
             data-testid="session-form-score"
           >
-            {score}
+            {score ?? "—"}
           </div>
           <div className="mt-6 grid grid-cols-2 gap-4 text-sm">
             <div>

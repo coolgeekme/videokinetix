@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { ZoomIn, ZoomOut, Maximize2, SwitchCamera, Target, AlertTriangle, Play, Pause } from "lucide-react";
 import { assessFrameQuality } from "../lib/frameQuality";
+import { assessCaptureQuality } from "../lib/captureQuality";
 import { analyzeSession, getKeyframeTimestamps } from "@/lib/repDetection";
 import {
   createTrackingState,
@@ -150,6 +151,9 @@ export default function PoseCanvas({
   const [trackingLost, setTrackingLost] = useState(false);
   const [trackBadge, setTrackBadge] = useState(null);
   const trackBadgeLabelRef = useRef(null);
+  // Detect-tick tallies for the capture-quality guard (lib/captureQuality.js).
+  // Counted only while recording, so selection-time ticks don't skew it.
+  const trackingTicksRef = useRef({ confirmed: 0, coasted: 0, lost: 0 });
   const [tapNotice, setTapNotice] = useState(null);
   const [personCount, setPersonCount] = useState(0);
   const [frameQuality, setFrameQuality] = useState({ level: "good", issues: [] });
@@ -423,6 +427,12 @@ export default function PoseCanvas({
       if (badge.label !== trackBadgeLabelRef.current) {
         trackBadgeLabelRef.current = badge.label;
         setTrackBadge(badge);
+      }
+      if (runningRef.current) {
+        const ticks = trackingTicksRef.current;
+        if (tracking.status === "tracking" || tracking.status === "recovered") ticks.confirmed += 1;
+        else if (tracking.status === "lost") ticks.lost += 1;
+        else ticks.coasted += 1;
       }
 
       // Draw all poses; highlight the target
@@ -1543,6 +1553,8 @@ export default function PoseCanvas({
     setRunning(true);
     setStatus("running");
     setTapNotice(null);
+    // Fresh tallies for this take.
+    trackingTicksRef.current = { confirmed: 0, coasted: 0, lost: 0 };
     // The resolver tracks its own recency; re-stamp it so the first detection
     // during recording isn't treated as a stale, long-coasted anchor.
     trackingStateRef.current = {
@@ -1683,15 +1695,29 @@ export default function PoseCanvas({
     const duration_s =
       frames.length > 1 ? frames[frames.length - 1].t - frames[0].t : 0;
     const ballFrames = ballFramesRef.current.filter((b) => b && b.x != null);
+    // Decide whether this capture is analysable BEFORE analysing it. If the
+    // tracked subject isn't plausibly an athlete (see lib/captureQuality.js),
+    // the analysis refuses to produce rep metrics rather than inventing them.
+    const captureQuality = assessCaptureQuality({
+      frames,
+      tracking: trackingTicksRef.current,
+    });
     let analysis;
     try {
       analysis = analyzeSession(frames, sport, {
         ballFrames: ballFrames.length ? ballFrames : null,
         hoopRoi: hoopRoiRef.current,
+        captureQuality,
       });
     } catch (e) {
       console.error("rep analysis failed:", e);
-      analysis = { sport, rep_count: 0, reps: [], no_reps_detected: true };
+      analysis = {
+        sport,
+        rep_count: 0,
+        reps: [],
+        no_reps_detected: true,
+        capture_quality: captureQuality,
+      };
     }
     const keyframes = {};
     for (const k of getKeyframeTimestamps(analysis)) {
@@ -2078,12 +2104,14 @@ export default function PoseCanvas({
           </button>
         )}
 
-        {/* tracking-lost warning */}
+        {/* tracking-lost warning. The tracker does NOT silently re-lock onto
+            whatever pose is nearby any more (that is how it used to end up on a
+            water-surface reflection), so this asks the user to re-acquire. */}
         {trackingLost && running && (
           <div className="absolute bottom-16 left-1/2 -translate-x-1/2 bg-black/85 backdrop-blur border border-[#ffab00]/60 px-5 py-3 text-center pointer-events-none">
             <AlertTriangle className="w-5 h-5 text-[#ffab00] mx-auto" />
             <div className="mt-1 text-[11px] uppercase tracking-widest font-display font-bold text-[#ffab00]">
-              Tracking lost — re-locking…
+              Athlete lost — tap to re-lock
             </div>
           </div>
         )}

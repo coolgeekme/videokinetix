@@ -16,9 +16,9 @@
  *    annotates each rep with its shot result.
  */
 
-import { detectShots, annotateRepsWithOutcomes, makesVsMissesStats } from "./shotDetection";
-import { L, angle } from "./repDetectionConstants";
-import { classifyStroke, contactPointMetrics, readyPositionStats, strokeBreakdown } from "./pickleballAnalysis";
+import { detectShots, annotateRepsWithOutcomes, makesVsMissesStats } from "./shotDetection.js";
+import { L, angle } from "./repDetectionConstants.js";
+import { classifyStroke, contactPointMetrics, readyPositionStats, strokeBreakdown } from "./pickleballAnalysis.js";
 
 // (kept for backward-compat — re-export same constants/helpers used below)
 // MediaPipe BlazePose 33 landmark indices — see repDetectionConstants.js
@@ -292,7 +292,7 @@ function summarizeArray(arr) {
  * Returns: rich session summary
  */
 export function analyzeSession(frames, sport, options = {}) {
-  const { ballFrames = null, hoopRoi = null } = options;
+  const { ballFrames = null, hoopRoi = null, captureQuality = null } = options;
   const cfg = SPORTS[sport];
   if (!cfg || frames.length < 5) {
     return {
@@ -304,6 +304,34 @@ export function analyzeSession(frames, sport, options = {}) {
       summary_stats: {},
       consistency: null,
       no_reps_detected: true,
+      capture_quality: captureQuality,
+    };
+  }
+
+  // Hard stop: if the capture guard says the tracked subject is not plausibly an
+  // athlete (a water-surface reflection, a splash plume, or simply too little
+  // signal), refuse to produce rep metrics at all. Reporting nothing is correct;
+  // reporting stroke counts derived from water is a fabrication. See
+  // lib/captureQuality.js for the evidence behind this.
+  if (captureQuality && captureQuality.level === "unusable") {
+    return {
+      sport,
+      rep_count: 0,
+      duration_seconds:
+        frames.length > 1 ? frames[frames.length - 1].t - frames[0].t : 0,
+      overall_score: null,
+      consistency: null,
+      reps: [],
+      best_rep: null,
+      worst_rep: null,
+      summary_stats: {},
+      coaching_cues: [],
+      no_reps_detected: true,
+      unreliable: true,
+      capture_quality: captureQuality,
+      shot_outcomes: null,
+      makes_vs_misses: null,
+      pickleball_stats: null,
     };
   }
 
@@ -494,6 +522,7 @@ export function analyzeSession(frames, sport, options = {}) {
     summary_stats,
     coaching_cues: cues,
     no_reps_detected: annotatedReps.length === 0,
+    capture_quality: captureQuality,
     shot_outcomes,
     makes_vs_misses,
     pickleball_stats,
