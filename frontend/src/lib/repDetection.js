@@ -359,15 +359,24 @@ export function analyzeSession(frames, sport, options = {}) {
     minProminence: cfg.minProminence,
   });
 
+  // A peak can land on a frame where the target was never detected (the capture
+  // records {t, lm: null} for those so the timeline stays continuous). Such a
+  // peak is not an analysable rep, and passing its null landmarks to the
+  // sport-specific `apex`/`validatePeak` code throws
+  // (TypeError: Cannot read properties of null) — which the caller catches and
+  // silently degrades to "no reps detected". Swimming loses the athlete for a
+  // large share of frames, so this happened routinely. Drop those peaks first.
+  const detectedPeaks = peaks.filter((p) => frames[p.index]?.lm);
+
   // Optional per-peak validator (sport-specific). For basketball this drops
   // setup/load peaks where the wrist hasn't actually crossed the shoulder
   // line — i.e., it's not a real release.
   const validatedPeaks = cfg.validatePeak
-    ? peaks.filter((p) => {
+    ? detectedPeaks.filter((p) => {
         const f = frames[p.index];
         return f && cfg.validatePeak(f.lm, f);
       })
-    : peaks;
+    : detectedPeaks;
 
   // Build per-rep records
   const reps = validatedPeaks.map((p, i) => {
